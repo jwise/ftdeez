@@ -12,9 +12,10 @@ import pyusbip
 
 _logger = logging.getLogger("ftdeez")
 
+# thanks to Wanda for the documentation on the D2xx protocol: https://wanda-phi.github.io/prjspeedbump/d2xx.html
+
 class BaseD2xxChannel:
-    def __init__(self, channel):
-        self.channel = channel
+    def __init__(self):
         self.latency_timer = 0x10
         self._logger = logging.getLogger(f"ftdeez.BaseD2xxChannel.{id(self)}")
         self._in_lock = asyncio.Lock()
@@ -22,9 +23,21 @@ class BaseD2xxChannel:
         self._in_latency_timer_start = None
         self._in_event = False
         self._in_buf = bytearray()
+        self._out_buf = bytearray()
     
     def get_modem_status(self):
-        return 0x0140
+        status = 0x0100
+        if len(self._in_buf) > 0:
+            status |= 0x0001
+        # overrun: 0x0002
+        # parity: 0x0004
+        # framing: 0x0008
+        # break: 0x0010
+        # THR (?): 0x0020
+        if len(self._out_buf) == 0:
+            status |= 0x0040
+        # FIFO error (?): 0x0080
+        return status
     
     def get_latency_timer(self):
         return self.latency_timer
@@ -33,7 +46,7 @@ class BaseD2xxChannel:
         self.latency_timer = wValue
     
     def get_pin_state(self):
-        # return DBUS pin state
+        # DBUS pin state
         return 0x00
     
     def reset(self, wValue):
@@ -59,6 +72,16 @@ class BaseD2xxChannel:
     
     def set_bitmode(self, wValue):
         pass
+
+    async def put_infifo(self, buf):
+        async with self._in_cvar:
+            self._in_buf.extend(buf)
+            self._in_cvar.notify_all()
+    
+    async def flag_inevent(self):
+        async with self._in_cvar:
+            self._in_event = True
+            self._in_cvar.notify_all()
 
     async def bulk_in(self, wLength):
         # only one bulk IN URB can be ready to return at a time
@@ -96,14 +119,9 @@ class BaseD2xxChannel:
             return struct.pack(">H", self.get_modem_status()) + bs
     
     async def bulk_out(self, buf):
+        # override this!
         await self.put_infifo(buf)
         return len(buf)
-    
-    async def put_infifo(self, buf):
-        # handle event char
-        async with self._in_cvar:
-            self._in_buf.extend(buf)
-            self._in_cvar.notify_all()
         
 
 class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
@@ -115,7 +133,7 @@ class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
                  iProduct = 'FTDEEZ',
                  iSerialNumber = '123456'):
         if channels is None:
-            channels = [BaseD2xxChannel(0), BaseD2xxChannel(1)]
+            channels = [BaseD2xxChannel(), BaseD2xxChannel()]
         self.channels = channels
         self.idVendor = idVendor
         self.idProduct = idProduct

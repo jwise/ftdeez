@@ -1,2 +1,3 @@
 usb_construct
 libusb1
+glasgow[builtin-toolchain] @ git+https://github.com/GlasgowEmbedded/glasgow@5c935bc2b8ba931ac1f7022f86214526442126d6#subdirectory=software
