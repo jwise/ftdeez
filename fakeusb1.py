@@ -1,5 +1,7 @@
+import logging
 import asyncio
 import usb1
+import traceback
 from usb_construct.emitters.descriptors import DeviceDescriptorCollection
 from usb_construct.types.descriptors import DeviceDescriptor, ConfigurationDescriptor, InterfaceDescriptor, EndpointDescriptor
 from usb_construct.types.descriptors.standard import StandardDescriptorNumbers
@@ -179,6 +181,11 @@ class BaseFakeUSBDevice(AbstractFakeUSBDevice):
         self.build_descriptors(self._descriptors)
         self.configuration = 0
         super().__init__()
+
+    def __setattr__(self, k, v):
+        super().__setattr__(k, v)
+        if (k == "bus_number" or k == "device_address") and getattr(self, "bus_number", None) and getattr(self, "device_address", None):
+            self._fakeusbdevice_logger = logging.getLogger(f"fakeusb1.BaseFakeUSBDevice.{self.bus_number}-{self.device_address}")
     
     @abstractmethod
     def build_descriptors(self, collection):
@@ -248,24 +255,24 @@ class BaseFakeUSBDevice(AbstractFakeUSBDevice):
         bRequestType_type = (bRequestType >> 5) & 3
         bRequestType_recipient = bRequestType & 0x1F
         
-        print(f"controlRead(bRequestType = {bRequestType:02x}, bRequest = {bRequest:02x}, wValue = {wValue:04x}, wIndex = {wIndex:04x}, wLength = {wLength:04x}")
+        self._fakeusbdevice_logger.debug(f"controlRead(bRequestType = {bRequestType:02x}, bRequest = {bRequest:02x}, wValue = {wValue:04x}, wIndex = {wIndex:04x}, wLength = {wLength:04x})")
         match ((bRequestType >> 5) & 3, bRequestType & 0x1F, bRequest):
             case (USB_bRequestType_Type.STANDARD, USB_bRequestType_Recipient.DEVICE, USB_bRequest_device.GET_DESCRIPTOR):
                 try:
                     # ignore language ID for now
                     bs = self._descriptors.get_descriptor_bytes(wValue >> 8, wValue & 0xFF)
                 except:
-                    print("no descriptor?")
+                    self._fakeusbdevice_logger.error("no descriptor?")
                     raise usb1.USBErrorPipe
                 return bs[:wLength]
             case (USB_bRequestType_Type.STANDARD, USB_bRequestType_Recipient.DEVICE, _):
-                print("unknown bRequest for device")
+                self._fakeusbdevice_logger.error("unknown bRequest for device")
                 raise usb1.USBErrorPipe
             case _:
-                print("unknown target for request")
-                raise usb1.USBErrorPipe
+                self._fakeusbdevice_logger.error("unknown target for request")
 
     def controlWrite(self, bRequestType, bRequest, wValue, wIndex, buf):
+        self._fakeusbdevice_logger.error("unsupported controlWrite")
         raise usb1.USBErrorPipe
 
     class Transfer(AbstractFakeUSBDevice.Transfer):
@@ -295,28 +302,35 @@ class BaseFakeUSBDevice(AbstractFakeUSBDevice):
         
         def submit(self):
             async def run_xfer():
-                if self.ep & 0x80:
-                    rv = await self.parent.bulk_in(self.ep, self.buffer)
-                    if type(rv) == bytes:
-                        self.actual_length = len(rv)
-                        self.status = 0
-                        self.buffer = rv
+                try:
+                    if self.ep & 0x80:
+                        rv = await self.parent.bulk_in(self.ep, self.buffer)
+                        if type(rv) == bytes:
+                            self.actual_length = len(rv)
+                            self.status = 0
+                            self.buffer = rv
+                        else:
+                            self.actual_length = 0
+                            self.status = -rv
+                            self.buffer = b''
                     else:
-                        self.actual_length = 0
-                        self.status = -rv
-                        self.buffer = b''
-                else:
-                    rv = await self.parent.bulk_out(self.ep, self.buffer)
-                    if rv >= 0:
-                        self.actual_length = rv
-                        self.status = 0
-                    else:
-                        self.status = -rv
-                        self.actual_length = 0
+                        rv = await self.parent.bulk_out(self.ep, self.buffer)
+                        if rv >= 0:
+                            self.actual_length = rv
+                            self.status = 0
+                        else:
+                            self.status = -rv
+                            self.actual_length = 0
+                except Exception as e:
+                    traceback.print_exc()
+                    self.parent._fakeusbdevice_logger.error("URB exception")
+                    self.status = -USB_EPIPE
+                    self.actual_length = 0
                 self.callback(self)
             self.task = asyncio.create_task(run_xfer())
     
         def cancel(self):
+            self.parent._fakeusbdevice_logger.error("URB cancelled")
             self.task.cancel()
             self.status = -USB_EPIPE
             self.actual_length = 0
@@ -329,7 +343,7 @@ class BaseFakeUSBDevice(AbstractFakeUSBDevice):
     @abstractmethod
     async def bulk_in(self, ep, buflen):
         pass
-    
+
     @abstractmethod
     async def bulk_out(self, ep, buf):
-        pass    
+        pass
