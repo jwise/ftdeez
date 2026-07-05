@@ -211,6 +211,8 @@ class GlasgowD2xxComponent(wiring.Component):
     rx_stream: Out(stream.Signature(8))
     tx_stream: In(stream.Signature(8))
     bit_cyc: In(24)
+    modem_line_status: Out(16)
+    ack_status: In(16)
     
     def __init__(self, ports):
         self.ports = ports # ideally, this would be a portgroup
@@ -219,7 +221,24 @@ class GlasgowD2xxComponent(wiring.Component):
     
     def elaborate(self, platform):
         m = Module()
+
+        # make I/O buffers for each port
+        ports_i = Signal(16)
+        ports_o = Signal(16)
+        ports_oe = Signal(16)
         
+        for p in range(16):
+            if not self.ports[f"p{p}"]:
+                ports_i[p].eq(1)
+                continue
+            buffer = io.Buffer("io", self.ports[f"p{p}"])
+            m.submodules += buffer
+            m.submodules += FFSynchronizer(buffer.i, ports_i[p], init=1)
+            m.d.comb += buffer.o.eq(ports_o[p])
+            m.d.comb += buffer.oe.eq(ports_oe[p])
+
+
+        ### UART SPECIFIC BITS ###        
         m.submodules.uart_rx = uart_rx = UartRx()
         wiring.connect(m, uart_rx.rx_stream, flipped(self.rx_stream))
         m.d.comb += uart_rx.bit_cyc.eq(self.bit_cyc)
@@ -234,11 +253,41 @@ class GlasgowD2xxComponent(wiring.Component):
         m.d.comb += uart_tx.stop_bits.eq(UartStopBits.Bits1)
         m.d.comb += uart_tx.parity.eq(UartParity.Off)
         
-        # XXX LATER: make this be dbus / cbus, and i/o buffers
-        m.submodules.rx_buffer = rx_buffer = io.Buffer("i", self.ports.rx)
-        m.submodules += FFSynchronizer(rx_buffer.i, uart_rx.rx, init=1)
-        m.submodules.tx_buffer = tx_buffer = io.Buffer("o", self.ports.tx)
-        m.d.comb += tx_buffer.o.eq(uart_tx.tx)
+        # XXX LATER: make this be muxed
+        ovf = Signal()
+        ovf_set = uart_rx.ovf
+        ovf_clr = self.ack_status[1]
+        
+        perr = Signal()
+        perr_set = uart_rx.perr
+        perr_clr = self.ack_status[2]
+        
+        ferr = Signal()
+        ferr_set = uart_rx.ferr
+        ferr_clr = self.ack_status[3]
+        
+        m.d.sync +=  ovf.eq(( ovf |  ovf_set) & ~ ovf_clr)
+        m.d.sync += perr.eq((perr | perr_set) & ~perr_clr)
+        m.d.sync += ferr.eq((ferr | ferr_set) & ~ferr_clr)
+
+        m.d.comb += ports_oe[0].eq(1)
+        m.d.comb += ports_o[0].eq(uart_tx.tx)
+        m.d.comb += uart_rx.rx.eq(ports_i[1])
+        
+        m.d.comb += self.modem_line_status[7].eq(1)
+        m.d.comb += self.modem_line_status[12].eq(~ports_i[3]) # CTSn
+        m.d.comb += self.modem_line_status[13].eq(~ports_i[5]) # DSRn
+        m.d.comb += self.modem_line_status[14].eq(~ports_i[7]) # RIn
+        m.d.comb += self.modem_line_status[15].eq(~ports_i[6]) # DCDn
+        
+        m.d.comb += self.modem_line_status[0].eq(self.rx_stream.ready == 0) # "data ready"?
+        m.d.comb += self.modem_line_status[1].eq(ovf)
+        m.d.comb += self.modem_line_status[2].eq(perr)
+        m.d.comb += self.modem_line_status[3].eq(ferr)
+        m.d.comb += self.modem_line_status[4].eq(0) # XXX: break interrupt
+        m.d.comb += self.modem_line_status[5].eq(0) # 'TX holding register'?
+        m.d.comb += self.modem_line_status[6].eq(self.tx_stream.valid == 0) # TX FIFO is empty
+        m.d.comb += self.modem_line_status[7].eq(0) # 'FIFO error'?
         
         return m
 
@@ -246,16 +295,32 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
     # supports only UART mode for now, and only barely that
     def __init__(self, assembly, pins):
         super().__init__()
-        self._logger = logging.getLogger(f"ftdeez_glasgow.GlasgowD2xxChannel.{id(self)}")
         
-        ports = assembly.add_port_group(tx=pins[0], rx=pins[1])
+        grp = {}
+        for n,p in enumerate(pins):
+            grp[f"p{n}"] = p
+        ports = assembly.add_port_group(**grp)
         component = assembly.add_submodule(GlasgowD2xxComponent(ports))
         self._pipe = assembly.add_inout_pipe(component.rx_stream, component.tx_stream)
         self._bit_cyc = assembly.add_rw_register(component.bit_cyc)
+        self._modem_line_status = assembly.add_ro_register(component.modem_line_status)
+        self._ack_status = assembly.add_rw_register(component.ack_status)
         self._sys_clk_period = assembly.sys_clk_period
         
         self._logger = logging.getLogger(f"ftdeez_glasgow.GlasgowD2xxChannel.{id(self)}")
         self.flush_queued = False
+    
+    async def get_modem_status(self):
+        modem_status = await self._modem_line_status.get()
+        if len(self._in_buf) > 0:
+            modem_status |= 0x0001
+
+        # XXX HACK: we can lose stuff here, this needs to be a one-shot strobe...
+        if modem_status & 0xE:
+            await self._ack_status.set(modem_status)
+            await self._ack_status.set(0)
+
+        return modem_status
     
     async def _set_baud(self, baud):
         cyc = round(1 / (baud * self._sys_clk_period))
@@ -337,7 +402,7 @@ async def main():
         
         pins = [pin if pin != '' else None for pin in pins]
         if len(pins) < 16:
-            pins.append([None] * (16 - len(pins)))
+            pins += [None] * (16 - len(pins))
         
         channels.append(GlasgowD2xxChannel(assembly, pins))
 

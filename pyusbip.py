@@ -230,7 +230,10 @@ class USBIPConnection:
             
             try:
                 if direction == USBIP_DIR_IN:
-                    data = dev.hnd.controlRead(bRequestType, bRequest, wValue, wIndex, wLength)
+                    if asyncio.iscoroutinefunction(dev.hnd.controlRead):
+                        data = await dev.hnd.controlRead(bRequestType, bRequest, wValue, wIndex, wLength)
+                    else:
+                        data = dev.hnd.controlRead(bRequestType, bRequest, wValue, wIndex, wLength)
                     resp = struct.pack(">IIIIIiiiii8s",
                         USBIP_RET_SUBMIT, seqnum,
                         0, 0, 0,
@@ -244,7 +247,10 @@ class USBIPConnection:
                     if fakeit:
                         wlen = 0
                     else:
-                        wlen = dev.hnd.controlWrite(bRequestType, bRequest, wValue, wIndex, buf)
+                        if asyncio.iscoroutinefunction(dev.hnd.controlWrite):
+                            wlen = await dev.hnd.controlWrite(bRequestType, bRequest, wValue, wIndex, buf)
+                        else:
+                            wlen = dev.hnd.controlWrite(bRequestType, bRequest, wValue, wIndex, buf)
                     resp = struct.pack(">IIIIIiiiii8s",
                         USBIP_RET_SUBMIT, seqnum,
                         0, 0, 0,

@@ -25,7 +25,7 @@ class BaseD2xxChannel:
         self._in_buf = bytearray()
         self._out_buf = bytearray()
     
-    def get_modem_status(self):
+    async def get_modem_status(self):
         status = 0x0100
         if len(self._in_buf) > 0:
             status |= 0x0001
@@ -116,7 +116,7 @@ class BaseD2xxChannel:
                 bs = self._in_buf[:wLength - 2]
                 self._in_buf[:wLength - 2] = b''
                 
-            return struct.pack(">H", self.get_modem_status()) + bs
+            return struct.pack(">H", await self.get_modem_status()) + bs
     
     async def bulk_out(self, buf):
         # override this!
@@ -170,11 +170,11 @@ class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
                         e.bEndpointAddress = 0x81 + chn
                         e.wMaxPacketSize   = 512
     
-    def controlRead(self, bRequestType, bRequest, wValue, wIndex, wLength):
+    async def controlRead(self, bRequestType, bRequest, wValue, wIndex, wLength):
         match (bRequestType, bRequest):
             case (0xC0, 0x05): # GET_MODEM_STATUS
                 self._logger.debug(f"GET_MODEM_STATUS channel {wIndex - 1}")
-                return struct.pack(">H", self.channels[wIndex - 1].get_modem_status())
+                return struct.pack(">H", await self.channels[wIndex - 1].get_modem_status())
             case (0xC0, 0x0A): # GET_LATENCY_TIMER
                 self._logger.debug(f"GET_LATENCY_TIMER channel {wIndex - 1}")
                 return struct.pack(">B", self.channels[wIndex - 1].get_latency_timer())
@@ -187,9 +187,9 @@ class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
             case (0xC0, 0x90): # READ_EEPROM
                 self._logger.debug(f"READ_EEPROM address {wIndex:04x}")
                 return b'\x00\x00'
-        return super().controlRead(bRequestType, bRequest, wValue, wIndex, wLength)
+        return await super().controlRead(bRequestType, bRequest, wValue, wIndex, wLength)
     
-    def controlWrite(self, bRequestType, bRequest, wValue, wIndex, buf):
+    async def controlWrite(self, bRequestType, bRequest, wValue, wIndex, buf):
         match (bRequestType, bRequest):
             case (0x40, 0x00): # RESET
                 self.channels[wIndex - 1].reset(wValue)
