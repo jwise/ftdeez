@@ -213,6 +213,7 @@ class GlasgowD2xxComponent(wiring.Component):
     bit_cyc: In(24)
     modem_line_status: Out(16)
     ack_status: In(16)
+    modem_ctrl: In(8)
     
     def __init__(self, ports):
         self.ports = ports # ideally, this would be a portgroup
@@ -238,7 +239,13 @@ class GlasgowD2xxComponent(wiring.Component):
             m.d.comb += buffer.oe.eq(ports_oe[p])
 
 
-        ### UART SPECIFIC BITS ###        
+        ### UART SPECIFIC BITS ###
+        # UART TODO: support BREAK mode
+        # UART TODO: support hardware flow control
+        # UART TODO: support xon/xoff flow control
+        # UART TODO: support "alert" character
+        # UART TODO: inject incorrect framing character on framing error
+        # UART TODO: hook up data bits, stop bits, parity
         m.submodules.uart_rx = uart_rx = UartRx()
         wiring.connect(m, uart_rx.rx_stream, flipped(self.rx_stream))
         m.d.comb += uart_rx.bit_cyc.eq(self.bit_cyc)
@@ -270,11 +277,19 @@ class GlasgowD2xxComponent(wiring.Component):
         m.d.sync += perr.eq((perr | perr_set) & ~perr_clr)
         m.d.sync += ferr.eq((ferr | ferr_set) & ~ferr_clr)
 
+        # PORTS
         m.d.comb += ports_oe[0].eq(1)
         m.d.comb += ports_o[0].eq(uart_tx.tx)
+
         m.d.comb += uart_rx.rx.eq(ports_i[1])
+
+        m.d.comb += ports_oe[2].eq(1) # RTSn
+        m.d.comb += ports_o[2].eq(~self.modem_ctrl[1]) # RTSn
+
+        m.d.comb += ports_oe[4].eq(1) # DTRn
+        m.d.comb += ports_o[4].eq(~self.modem_ctrl[0]) # DTRn
         
-        m.d.comb += self.modem_line_status[7].eq(1)
+        m.d.comb += self.modem_line_status[8].eq(1)
         m.d.comb += self.modem_line_status[12].eq(~ports_i[3]) # CTSn
         m.d.comb += self.modem_line_status[13].eq(~ports_i[5]) # DSRn
         m.d.comb += self.modem_line_status[14].eq(~ports_i[7]) # RIn
@@ -305,6 +320,8 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
         self._bit_cyc = assembly.add_rw_register(component.bit_cyc)
         self._modem_line_status = assembly.add_ro_register(component.modem_line_status)
         self._ack_status = assembly.add_rw_register(component.ack_status)
+        self._modem_ctrl = assembly.add_rw_register(component.modem_ctrl)
+        
         self._sys_clk_period = assembly.sys_clk_period
         
         self._logger = logging.getLogger(f"ftdeez_glasgow.GlasgowD2xxChannel.{id(self)}")
@@ -321,6 +338,17 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
             await self._ack_status.set(0)
 
         return modem_status
+    
+    async def set_modem_ctrl(self, wvalue):
+        modem_ctrl = await self._modem_ctrl.get()
+        if wvalue & 0x0100:
+            modem_ctrl &= ~0x01
+            modem_ctrl |= wvalue & 0x01
+        if wvalue & 0x0200:
+            modem_ctrl &= ~0x02
+            modem_ctrl |= wvalue & 0x02
+        
+        await self._modem_ctrl.set(modem_ctrl)
     
     async def _set_baud(self, baud):
         cyc = round(1 / (baud * self._sys_clk_period))

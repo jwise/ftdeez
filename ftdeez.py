@@ -197,7 +197,7 @@ class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
                 return 0
             case (0x40, 0x01): # SET_MODEM_CTRL
                 self._logger.debug(f"SET_MODEM_CTRL channel {wIndex - 1} -> 0x{wValue:04x}")
-                self.channels[wIndex - 1].set_modem_ctrl(wValue)
+                await self.channels[wIndex - 1].set_modem_ctrl(wValue)
                 return 0
             case (0x40, 0x02): # SET_FLOW_CTRL
                 self._logger.debug(f"SET_FLOW_CTRL channel {(wIndex & 0xFF) - 1} -> 0x{wValue:04x}, 0x{wIndex:04x}")
