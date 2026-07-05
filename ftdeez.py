@@ -196,7 +196,7 @@ class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
                 self._logger.debug(f"RESET channel {wIndex - 1}")
                 return 0
             case (0x40, 0x01): # SET_MODEM_CTRL
-                self._logger.debug(f"SET_MODEM_CTRL channel {wIndex} -> 0x{wValue:04x}")
+                self._logger.debug(f"SET_MODEM_CTRL channel {wIndex - 1} -> 0x{wValue:04x}")
                 self.channels[wIndex - 1].set_modem_ctrl(wValue)
                 return 0
             case (0x40, 0x02): # SET_FLOW_CTRL
@@ -208,23 +208,23 @@ class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
                 self.channels[(wIndex & 0xFF) - 1].set_baud_rate(((wIndex & 0xFF00) << 8) | wValue)
                 return 0
             case (0x40, 0x04): # SET_DATA_CHARACTERISTICS
-                self._logger.debug(f"SET_DATA_CHARACTERISTICS channel {wIndex} -> 0x{wValue:04x}")
+                self._logger.debug(f"SET_DATA_CHARACTERISTICS channel {wIndex - 1} -> 0x{wValue:04x}")
                 self.channels[wIndex - 1].set_data_characteristics(wValue)
                 return 0
             case (0x40, 0x06): # SET_EVENT_CHAR
-                self._logger.debug(f"SET_EVENT_CHAR channel {wIndex} -> 0x{wValue:04x}")
+                self._logger.debug(f"SET_EVENT_CHAR channel {wIndex - 1} -> 0x{wValue:04x}")
                 self.channels[wIndex - 1].set_event_char(wValue)
                 return 0
             case (0x40, 0x07): # SET_ERROR_CHAR
-                self._logger.debug(f"SET_ERROR_CHAR channel {wIndex} -> 0x{wValue:04x}")
+                self._logger.debug(f"SET_ERROR_CHAR channel {wIndex - 1} -> 0x{wValue:04x}")
                 self.channels[wIndex - 1].set_error_char(wValue)
                 return 0
             case (0x40, 0x09): # SET_LATENCY_TIMER
-                self._logger.debug(f"SET_LATENCY_TIMER channel {wIndex} -> 0x{wValue:04x}")
+                self._logger.debug(f"SET_LATENCY_TIMER channel {wIndex - 1} -> 0x{wValue:04x}")
                 self.channels[wIndex - 1].set_latency_timer(wValue)
                 return 0
             case (0x40, 0x0b): # SET_BITMODE
-                self._logger.debug(f"SET_BITMODE channel {wIndex} -> 0x{wValue:04x}")
+                self._logger.debug(f"SET_BITMODE channel {wIndex - 1} -> 0x{wValue:04x}")
                 self.channels[wIndex - 1].set_bitmode(wValue)
                 return 0
             case (0x40, 0x21): # VENDOR_CMD_SET
