@@ -251,7 +251,7 @@ class BaseFakeUSBDevice(AbstractFakeUSBDevice):
     def setInterfaceAltSetting(self, wIndex, wValue):
         pass
     
-    def controlRead(self, bRequestType, bRequest, wValue, wIndex, wLength):
+    async def controlRead(self, bRequestType, bRequest, wValue, wIndex, wLength):
         bRequestType_type = (bRequestType >> 5) & 3
         bRequestType_recipient = bRequestType & 0x1F
         
@@ -265,13 +265,16 @@ class BaseFakeUSBDevice(AbstractFakeUSBDevice):
                     self._fakeusbdevice_logger.error("no descriptor?")
                     raise usb1.USBErrorPipe
                 return bs[:wLength]
+            case (USB_bRequestType_Type.STANDARD, USB_bRequestType_Recipient.DEVICE, USB_bRequest_device.GET_STATUS):
+                self._fakeusbdevice_logger.warning("bRequest = GET_STATUS? well ok")
+                return b'\x00\x00'
             case (USB_bRequestType_Type.STANDARD, USB_bRequestType_Recipient.DEVICE, _):
-                self._fakeusbdevice_logger.error("unknown bRequest for device")
+                self._fakeusbdevice_logger.error(f"unknown bRequest for device {bRequest:02x}")
                 raise usb1.USBErrorPipe
             case _:
                 self._fakeusbdevice_logger.error("unknown target for request")
 
-    def controlWrite(self, bRequestType, bRequest, wValue, wIndex, buf):
+    async def controlWrite(self, bRequestType, bRequest, wValue, wIndex, buf):
         self._fakeusbdevice_logger.error("unsupported controlWrite")
         raise usb1.USBErrorPipe
 
