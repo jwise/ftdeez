@@ -323,6 +323,7 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
         self._modem_ctrl = assembly.add_rw_register(component.modem_ctrl)
         
         self._sys_clk_period = assembly.sys_clk_period
+        print(f"sys_clk_period = {assembly.sys_clk_period}")
         
         self._logger = logging.getLogger(f"ftdeez_glasgow.GlasgowD2xxChannel.{id(self)}")
         self.flush_queued = False

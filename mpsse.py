@@ -10,60 +10,11 @@ from contextlib import contextmanager
 
 from amaranth import *
 from amaranth.lib.wiring import In, Out, flipped
-from amaranth.lib import enum, wiring, io, stream
+from amaranth.lib import enum, wiring, io, stream, data
 from amaranth.lib.cdc import FFSynchronizer
 
 
 __all__ = ['MPSSE']
-
-"""
-class MPSSEBus(Module):
-    layout = [
-        ("tck",   1),
-        ("tdi",   1),
-        ("tdo",   1),
-        ("tms",   1),
-        ("gpiol", 4),
-        ("gpioh", 8)
-    ]
-
-    def __init__(self, pads):
-        assert len(pads) >= 4 # at least TDI, TDO, TCK, TMS
-
-        self.ri  = Record(self.layout)
-        self.ro  = Record(self.layout)
-        self.roe = Record(self.layout)
-
-        self.i   = self.ri.raw_bits()
-        self.o   = self.ro.raw_bits()
-        self.oe  = self.roe.raw_bits()
-
-        self.xi  = Array([self.i [0:8], self.i [8:16]])
-        self.xo  = Array([self.o [0:8], self.o [8:16]])
-        self.xoe = Array([self.oe[0:8], self.oe[8:16]])
-
-        self.tck = self.ro.tck
-        self.tdi = self.ro.tdi
-        self.tdo = Signal()
-        self.tms = self.ro.tms
-
-        self.loopback = Signal()
-
-        ###
-
-        self.comb += [
-            Cat([pad.o  for pad in pads]).eq(self.o),
-            Cat([pad.oe for pad in pads]).eq(self.oe),
-            If(self.loopback,
-                self.tdo.eq(self.ro.tdi)
-            ).Else(
-                self.tdo.eq(self.ri.tdo)
-            )
-        ]
-        self.specials += [
-            MultiReg(Cat([pad.i for pad in pads]), self.i)
-        ]
-"""
 
 class MPSSEClockGen(wiring.Component):
     clken: In(1)
@@ -97,14 +48,14 @@ class MPSSEClockGen(wiring.Component):
     def elaborate(self, platform):
         m = Module()
         
-        clk2x   = Signal(reset=1)
+        clk2x   = Signal(init=1)
         counter = Signal(24)
         
         divisor_computed = Signal(24)
         m.d.sync += divisor_computed.eq(
-            Mux(legacy_divisor_en,
-                (divisor + 1) * self.SYSCLK_MULTIPLIER - 1,
-                divisor # should be * SYSCLK_MULTIPLIER / 5!  but *you* divide by 5 in digital logic.
+            Mux(self.legacy_divisor_en,
+                (self.divisor + 1) * self.SYSCLK_MULTIPLIER - 1,
+                self.divisor # should be * SYSCLK_MULTIPLIER / 5!  but *you* divide by 5 in digital logic.
             ))
         
         with m.If(self.clken):
@@ -115,7 +66,7 @@ class MPSSEClockGen(wiring.Component):
                 m.d.sync += counter.eq(counter - 1)
         with m.Else():
             m.d.sync += counter.eq(divisor_computed)
-            m.d.sync += clk2x.eq(clk2x.reset)
+            m.d.sync += clk2x.eq(clk2x.init)
         # XXX: I think this causes CLK2X to actually be at 1x of the
         # programmed divisor time?
 
@@ -134,8 +85,8 @@ class MPSSEClockGen(wiring.Component):
         m.d.sync += self.tck.eq(self.tck ^ tckstb)
         m.d.comb += [
             tckstb.eq((self.clkpos | self.clkneg) & self.tcken),
-            self.tckpos.eq(tckstb & ~tck),
-            self.tckneg.eq(tckstb &  tck)
+            self.tckpos.eq(tckstb & ~self.tck),
+            self.tckneg.eq(tckstb &  self.tck)
         ]
         
         return m
@@ -150,24 +101,36 @@ class MPSSE(wiring.Component):
     pads_oe: Out(16)
     
     def elaborate(self, platform):
-        divisor = Signal(16, reset=0)
-        legacy_divisor_en = Signal(reset=1)
+        m = Module()
+        
+        divisor = Signal(16, init=0)
+        legacy_divisor_en = Signal(init=1)
 
         position = Signal(data.FlexibleLayout(19, {
             "bit":    data.Field(unsigned(3), 0),
             "lobyte": data.Field(unsigned(8), 3),
             "hibyte": data.Field(unsigned(8), 11),
         }))
+        
+        # expose for TB
+        self.divisor = divisor
+        self.position = position
+        self.legacy_divisor_en = legacy_divisor_en
 
         # Clock generator
 
-        pad_o_tck = ...
+        # XXX: how does real FTDI deal with a GPIO set request for TCK?
+        pad_o_tck = self.pads_o[0]
+        pad_o_tdi = self.pads_o[1]
+        pad_i_tdo = self.pads_i[2]
+        pad_o_tms = self.pads_o[3]
+        
+        loopback = Signal()
 
-        clkgen = MPSSEClockGen(self.divisor, self.bus.tck, self.legacy_divisor_en)
-        self.submodules.clkgen = clkgen = MPSSEClockGen()
-        self.d.comb += clkgen.divisor.eq(divisor)
-        self.d.comb += clkgen.legacy_divisor_en.eq(legacy_divisor_en)
-        self.d.comb += pad_o_tck.eq(clkgen.tck)
+        m.submodules.clkgen = clkgen = MPSSEClockGen()
+        m.d.comb += clkgen.divisor.eq(divisor)
+        m.d.comb += clkgen.legacy_divisor_en.eq(legacy_divisor_en)
+        m.d.comb += pad_o_tck.eq(clkgen.tck)
 
         # Command decoder
 
@@ -190,7 +153,7 @@ class MPSSE(wiring.Component):
             m.d.comb += shift_cmd.eq(curr_cmd[:7])
         with m.Elif(curr_cmd == 0x8E):
             m.d.comb += shift_cmd.eq(0x02)
-        with m.Else(curr_cmd == 0x8F):
+        with m.Elif(curr_cmd == 0x8F):
             m.d.comb += shift_cmd.eq(0x00)
 
         is_gpio      = curr_cmd[2:] == 0b100000
@@ -208,16 +171,17 @@ class MPSSE(wiring.Component):
         @contextmanager
         def _produce_output(out):
             m.d.comb += self.out_stream.valid.eq(1)
-            m.d.comb += self.out_stream.data.eq(out)
+            m.d.comb += self.out_stream.payload.eq(out)
             with m.If(self.out_stream.ready):
                 yield
 
-        with m.FSM():
+        with m.FSM() as fsm:
+            self.fsm = fsm
             m.d.comb += curr_cmd.eq(pend_cmd) # overridden in IDLE only
             
             with m.State("IDLE"), _consume_input():
-                m.d.comb += curr_cmd.eq(self.in_stream.data)
-                m.d.sync += pend_cmd.eq(self.in_stream.data)
+                m.d.comb += curr_cmd.eq(self.in_stream.payload)
+                m.d.sync += pend_cmd.eq(self.in_stream.payload)
                 
                 with m.If(is_shift):
                     m.d.sync += position.eq(0)
@@ -248,9 +212,9 @@ class MPSSE(wiring.Component):
                 with m.Elif(curr_cmd == 0x86):
                     m.next = "DIVISOR-LOBYTE"
                 with m.Elif(curr_cmd == 0x84):
-                    m.d.sync += self.bus.loopback.eq(1)
+                    m.d.sync += loopback.eq(1)
                 with m.Elif(curr_cmd == 0x85):
-                    m.d.sync += self.bus.loopback.eq(0)
+                    m.d.sync += loopback.eq(0)
                 with m.Elif(curr_cmd == 0x8A):
                     m.d.sync += legacy_divisor_en.eq(0)
                 with m.Elif(curr_cmd == 0x8B):
@@ -268,21 +232,21 @@ class MPSSE(wiring.Component):
                     m.next = "SHIFT-SETUP"
 
             with m.State("SHIFT-LENGTH-LOBYTE"), _consume_input():
-                m.d.sync += self.rposition.bit.eq(7),
-                m.d.sync += self.rposition.lobyte.eq(self.in_stream.data)
+                m.d.sync += position.bit.eq(7),
+                m.d.sync += position.lobyte.eq(self.in_stream.payload)
                 m.next = "SHIFT-LENGTH-HIBYTE"
 
             with m.State("SHIFT-LENGTH-HIBYTE"), _consume_input():
-                m.d.sync += self.rposition.hibyte.eq(self.in_stream.data)
+                m.d.sync += position.hibyte.eq(self.in_stream.payload)
                 begin_shifting()
 
             with m.State("SHIFT-LENGTH-BITS"), _consume_input():
-                m.d.sync += self.rposition.bit.eq(self.in_stream.data)
+                m.d.sync += position.bit.eq(self.in_stream.payload)
                 begin_shifting()
 
             # Shift subcommand, actual shifting
 
-            rx_data_be = Mux(~shift_cmd_le, self.in_stream.data, Cat([self.in_stream.data[7 - i] for i in range(8)]))
+            rx_data_be = Mux(~shift_cmd.le, self.in_stream.payload, Cat([self.in_stream.payload[7 - i] for i in range(8)]))
 
             bits_in = Signal(8)
             bits_out = Signal(8)
@@ -305,9 +269,9 @@ class MPSSE(wiring.Component):
             with m.State("SHIFT-LOAD"), _consume_input():
                 m.d.sync += bits_in.eq(rx_data_be << 1),
                 with m.If(shift_cmd.tdi):
-                    m.d.sync += self.bus.tdi.eq(rx_data_be[7])
+                    m.d.sync += pad_o_tdi.eq(rx_data_be[7])
                 with m.Else():
-                    m.d.sync += self.bus.tms.eq(rx_data_be[7])
+                    m.d.sync += pad_o_tms.eq(rx_data_be[7])
                 m.next = "SHIFT-SETUP"
 
             with m.State("SHIFT-SETUP"):
@@ -322,21 +286,21 @@ class MPSSE(wiring.Component):
                 with m.If(output_setup):
                     m.d.sync += bits_in.eq(bits_in << 1)
                     with m.If(shift_cmd.tdi):
-                        m.d.sync += self.bus.tdi.eq(bits_in[7])
+                        m.d.sync += pad_o_tdi.eq(bits_in[7])
                     with m.Elif(shift_cmd.tms):
-                        m.d.sync += self.bus.tms.eq(bits_in[7])
+                        m.d.sync += pad_o_tms.eq(bits_in[7])
                 with m.If(input_setup):
                     m.d.sync += bits_out.eq(bits_out << 1),
                     with m.If(shift_cmd.tdo):
-                        m.d.sync += bits_out[0].eq(self.bus.tdo)
+                        m.d.sync += bits_out[0].eq(pad_i_tdo)
                 with m.If(clkgen.clkpos):
-                    with m.If(position == 0):
+                    with m.If(position.as_value() == 0):
                         with m.If(shift_cmd.tdo):
                             m.next = "SHIFT-REPORT"
                         with m.Else():
                             m.next = "IDLE"
                     with m.Else():
-                        m.d.sync += position.eq(position - 1)
+                        m.d.sync += position.as_value().eq(position.as_value() - 1)
 
             # XXX: I believe this never worked for >= 1 byte of data
             with m.State("SHIFT-REPORT"):
@@ -346,31 +310,31 @@ class MPSSE(wiring.Component):
             # GPIO commands
 
             with m.State("GPIO-READ-I"):
-                with _produce_output(Mux(gpio_cmd_adr == 0, pads_i[0:8], pads_i[8:16])):
+                with _produce_output(Mux(gpio_cmd_adr == 0, self.pads_i[0:8], self.pads_i[8:16])):
                     m.next = "IDLE"
 
             with m.State("GPIO-WRITE-O"), _consume_input():
                 with m.If(gpio_cmd_adr == 0):
-                    m.d.sync += self.pads_o[0:8].eq(self.in_stream.data)
+                    m.d.sync += self.pads_o[1:8].eq(self.in_stream.payload[1:8]) # pads_o[0] belongs to tck forever!
                 with m.Else():
-                    m.d.sync += self.pads_o[8:16].eq(self.in_stream.data)
+                    m.d.sync += self.pads_o[8:16].eq(self.in_stream.payload)
                 m.next = "GPIO-WRITE-OE"
 
             with m.State("GPIO-WRITE-OE"), _consume_input():
                 with m.If(gpio_cmd_adr == 0):
-                    m.d.sync += self.pads_oe[0:8].eq(self.in_stream.data)
+                    m.d.sync += self.pads_oe[0:8].eq(self.in_stream.payload)
                 with m.Else():
-                    m.d.sync += self.pads_oe[8:16].eq(self.in_stream.data)
+                    m.d.sync += self.pads_oe[8:16].eq(self.in_stream.payload)
                 m.next = "IDLE"
 
             # Divisor subcommand
 
             with m.State("DIVISOR-LOBYTE"), _consume_input():
-                m.d.sync += divisor[0:8].eq(self.in_stream.data)
+                m.d.sync += divisor[0:8].eq(self.in_stream.payload)
                 m.next = "DIVISOR-HIBYTE"
 
             with m.State("DIVISOR-HIBYTE"), _consume_input():
-                m.d.sync += divisor[8:16].eq(self.in_stream.data),
+                m.d.sync += divisor[8:16].eq(self.in_stream.payload),
                 m.next = "IDLE"
 
             # Error "subcommand"
@@ -381,33 +345,29 @@ class MPSSE(wiring.Component):
             with m.State("ERROR-DESC"):
                 with _produce_output(pend_cmd):
                     m.next = "IDLE"
+        
+        return m
 
 # -------------------------------------------------------------------------------------------------
 
 import unittest
 
 from glasgow.gateware import simulation_test
+from amaranth.sim import Tick
 
 # XXX: this has not been updated, obviously
 class MPSSETestbench(Elaboratable):
+    def __init__(self):
+        self.dut = MPSSE()
+        self.tck = self.dut.pads_o[0]
+        self.tdi = self.dut.pads_o[1]
+        self.tdo = self.dut.pads_i[2]
+        self.tms = self.dut.pads_o[3]
+        
     def elaborate(self, platform):
         m = Module()
         
-        m.submodules.dut = MPSSE()
-
-        self.tck   = TSTriple()
-        self.tdi   = TSTriple()
-        self.tdo   = TSTriple()
-        self.tms   = TSTriple()
-        self.gpiol = [TSTriple() for _ in range(4)]
-        self.gpioh = [TSTriple() for _ in range(8)]
-
-        self.pads  = [self.tck, self.tdi, self.tdo, self.tms,
-                      *self.gpiol, *self.gpioh]
-        self.i     = Cat([pad.i  for pad in self.pads])
-        self.o     = Cat([pad.o  for pad in self.pads])
-        self.oe    = Cat([pad.oe for pad in self.pads])
-
+        m.submodules.dut = self.dut
 
         self.clkdiv = 5
         
@@ -417,29 +377,29 @@ class MPSSETestbench(Elaboratable):
         self.states = {v: k for k, v in self.dut.fsm.encoding.items()}
 
     def dut_state(self):
-        return self.states[(yield self.dut.fsm.state)]
+        state = {v: k for k, v in self.dut.fsm.encoding.items()}
+        return state[(yield self.dut.fsm.state)]
 
     def write(self, byte):
-        yield self.dut.rx_data.eq(byte)
-        yield self.dut.rx_rdy.eq(1)
+        yield self.dut.in_stream.payload.eq(byte)
+        yield self.dut.in_stream.valid.eq(1)
         for _ in range(32 * self.clkdiv):
-            yield
-            if (yield self.dut.rx_ack) == 1:
-                yield self.dut.rx_data.eq(0)
-                yield self.dut.rx_rdy.eq(0)
-                yield
+            if (yield self.dut.in_stream.ready) == 1:
+                yield Tick()
+                yield self.dut.in_stream.valid.eq(0)
                 return
+            yield Tick()
         raise Exception("DUT stuck while writing")
 
     def read(self):
-        yield self.dut.tx_ack.eq(1)
+        yield self.dut.out_stream.ready.eq(1)
         for _ in range(32 * self.clkdiv):
-            yield
-            if (yield self.dut.tx_rdy) == 1:
-                byte = (yield self.dut.tx_data)
-                yield self.dut.tx_ack.eq(0)
-                yield
+            if (yield self.dut.out_stream.valid) == 1:
+                byte = (yield self.dut.out_stream.payload)
+                yield Tick()
+                yield self.dut.out_stream.ready.eq(0)
                 return byte
+            yield Tick()
         raise Exception("DUT stuck while reading")
 
     def _wait_for_tck(self, at_setup=None):
@@ -447,9 +407,9 @@ class MPSSETestbench(Elaboratable):
         for _ in range(64 * self.clkdiv):
             if at_setup:
                 setup = (yield from at_setup())
-            tckold = (yield self.tck.o)
-            yield
-            tcknew = (yield self.tck.o)
+            tckold = (yield self.tck)
+            yield Tick()
+            tcknew = (yield self.tck)
             if tckold != tcknew:
                 break
         if tckold == tcknew:
@@ -460,43 +420,43 @@ class MPSSETestbench(Elaboratable):
         bits = 0
         for n in range(nbits * 2):
             yield from self._wait_for_tck()
-            if (yield self.tck.o) == pos:
-                bits = (bits << 1) | (yield self.tdi.o)
+            if (yield self.tck) == pos:
+                bits = (bits << 1) | (yield self.tdi)
         return bits
 
     def recv_tms(self, nbits, pos):
         bits = 0
         for n in range(nbits * 2):
             yield from self._wait_for_tck()
-            if (yield self.tck.o) == pos:
-                bits = (bits << 1) | (yield self.tms.o)
+            if (yield self.tck) == pos:
+                bits = (bits << 1) | (yield self.tms)
         return bits
 
     def xfer(self, nbits, out_bits, in_bits, out_pos, in_pos):
         for n in range(nbits * 2):
             tdiold = (yield from self._wait_for_tck(
-                at_setup=lambda: (yield self.tdi.o)))
-            tcknew = (yield self.tck.o)
+                at_setup=lambda: (yield self.tdi)))
+            tcknew = (yield self.tck)
 
             if in_pos == tcknew:
-                if (yield self.tdi.o) != tdiold:
-                    yield; yield; yield; yield
+                if (yield self.tdi) != tdiold:
+                    yield Tick(); yield Tick(); yield Tick(); yield Tick()
                     raise Exception("DUT violated setup/hold timings")
 
                 in_bit  = in_bits  & (1 << (nbits - n // 2) - 1)
                 # print(f"{in_bits:0{nbits}b} {in_bit:0{nbits}b} ")
-                if (yield self.tdi.o) != (in_bit != 0):
-                    yield; yield; yield; yield
+                if (yield self.tdi) != (in_bit != 0):
+                    yield Tick(); yield Tick(); yield Tick(); yield Tick()
                     raise Exception("DUT clocked out bit {} as {} (expected {})"
-                                    .format(n // 2, (yield self.tdi.o), 1 if in_bit else 0))
+                                    .format(n // 2, (yield self.tdi), 1 if in_bit else 0))
             if out_pos == tcknew:
                 out_bit = out_bits & (1 << (nbits - n // 2) - 1)
-                yield self.tdo.i.eq(out_bit)
+                yield self.tdo.eq(out_bit)
 
         for _ in range(16 * self.clkdiv):
-            tckold = (yield self.tck.o)
-            yield
-            tcknew = (yield self.tck.o)
+            tckold = (yield self.tck)
+            yield Tick()
+            tcknew = (yield self.tck)
             if tckold != tcknew and in_pos == tcknew:
                 raise Exception("DUT spuriously drives TCK")
 
@@ -526,8 +486,8 @@ class MPSSETestCase(unittest.TestCase):
 
     @simulation_test
     def test_gpio_read(self, tb):
-        yield tb.i.eq(0xAA55)
-        yield
+        yield tb.dut.pads_i.eq(0xAA55)
+        yield Tick()
         yield from tb.write(0x81)
         self.assertEqual((yield from tb.read()), 0x55)
         yield from tb.write(0x83)
@@ -539,20 +499,20 @@ class MPSSETestCase(unittest.TestCase):
         yield from tb.write(0x80)
         yield from tb.write(0xA1)
         yield from tb.write(0x52)
-        self.assertEqual((yield tb.o),  0x00A1)
-        self.assertEqual((yield tb.oe), 0x0052)
+        self.assertEqual((yield tb.dut.pads_o),  0x00A1)
+        self.assertEqual((yield tb.dut.pads_oe), 0x0052)
         yield from tb.write(0x82)
         yield from tb.write(0x7E)
         yield from tb.write(0x81)
-        self.assertEqual((yield tb.o),  0x7EA1)
-        self.assertEqual((yield tb.oe), 0x8152)
+        self.assertEqual((yield tb.dut.pads_o),  0x7EA1)
+        self.assertEqual((yield tb.dut.pads_oe), 0x8152)
         self.assertEqual((yield from tb.dut_state()), "IDLE")
 
     @simulation_test
     def test_bits_write(self, tb):
         yield from tb.write(0x12)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         yield from tb.write(0x55)
         self.assertEqual((yield from tb.recv_tdi(5, pos=True)), 0x0A)
 
@@ -560,9 +520,9 @@ class MPSSETestCase(unittest.TestCase):
     def test_clk_bits(self, tb):
         yield from tb.write(0x8E)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         self.assertEqual((yield from tb.recv_tdi(6, pos=True)), 0x00)
-        self.assertEqual((yield tb.dut.bus.tck), 0)
+        self.assertEqual((yield tb.tck), 0)
         self.assertEqual((yield from tb.dut_state()), "IDLE")
 
     @simulation_test
@@ -570,17 +530,17 @@ class MPSSETestCase(unittest.TestCase):
         yield from tb.write(0x8F)
         yield from tb.write(5)
         yield from tb.write(0)
-        self.assertEqual((yield tb.dut.rposition.lobyte), 5)
-        self.assertEqual((yield tb.dut.rposition.hibyte), 0)
+        self.assertEqual((yield tb.dut.position.lobyte), 5)
+        self.assertEqual((yield tb.dut.position.hibyte), 0)
         self.assertEqual((yield from tb.recv_tdi(48, pos=True)), 0x00)
-        self.assertEqual((yield tb.dut.bus.tck), 0)
+        self.assertEqual((yield tb.tck), 0)
         self.assertEqual((yield from tb.dut_state()), "IDLE")
 
     @simulation_test
     def test_bits_read(self, tb):
         yield from tb.write(0x22)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         self.assertEqual((yield from tb.read()), 0x00)
 
     @simulation_test
@@ -592,7 +552,7 @@ class MPSSETestCase(unittest.TestCase):
         # works
         yield from tb.write(0x22)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         self.assertEqual((yield from tb.read()), 0x00)
 
         # works
@@ -600,7 +560,7 @@ class MPSSETestCase(unittest.TestCase):
         self.tb.clkdiv = 1
         yield from tb.write(0x22)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         self.assertEqual((yield from tb.read()), 0x00)
 
         # fails - timeout
@@ -608,7 +568,7 @@ class MPSSETestCase(unittest.TestCase):
         self.tb.clkdiv = 1
         yield from tb.write(0x22)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         with self.assertRaises(Exception):
             yield from tb.read()
 
@@ -617,7 +577,7 @@ class MPSSETestCase(unittest.TestCase):
         yield from tb.write(0x84)
         yield from tb.write(0x33)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         yield from tb.write(0x55)
         self.assertEqual((yield from tb.recv_tdi(5, pos=True)), 0x0A)
         self.assertEqual((yield from tb.read()), 0x15) # non-negative read clock
@@ -626,7 +586,7 @@ class MPSSETestCase(unittest.TestCase):
     def test_tms_write(self, tb):
         yield from tb.write(0x4A)
         yield from tb.write(5)
-        self.assertEqual((yield tb.dut.rposition.bit), 5)
+        self.assertEqual((yield tb.dut.position.bit), 5)
         yield from tb.write(0x55)
         self.assertEqual((yield from tb.recv_tms(5, pos=True)), 0x15)
 
@@ -650,9 +610,9 @@ class MPSSETestCase(unittest.TestCase):
     def test_hibyte_lobyte_write(self, tb):
         yield from tb.write(0x10)
         yield from tb.write(0x05)
-        self.assertEqual((yield tb.dut.rposition.lobyte), 0x05)
+        self.assertEqual((yield tb.dut.position.lobyte), 0x05)
         yield from tb.write(0x11)
-        self.assertEqual((yield tb.dut.rposition.hibyte), 0x11)
+        self.assertEqual((yield tb.dut.position.hibyte), 0x11)
 
     @simulation_test
     def test_divisor_write(self, tb):
@@ -700,5 +660,5 @@ class MPSSETestCase(unittest.TestCase):
         yield from tb.write(0x00)
         yield from tb.write(0xA5)
         self.assertEqual((yield from tb.recv_tdi(8, pos=False)), 0xA5)
-        yield
-        self.assertEqual((yield tb.tck.o), 0)
+        yield Tick()
+        self.assertEqual((yield tb.tck), 0)
