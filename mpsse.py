@@ -122,10 +122,10 @@ class MPSSE(wiring.Component):
         # XXX: how does real FTDI deal with a GPIO set request for TCK?
         pad_o_tck = self.pads_o[0]
         pad_o_tdi = self.pads_o[1]
-        pad_i_tdo = self.pads_i[2]
         pad_o_tms = self.pads_o[3]
         
         loopback = Signal()
+        pad_i_tdo = Mux(loopback, pad_o_tdi, self.pads_i[2])
 
         m.submodules.clkgen = clkgen = MPSSEClockGen()
         m.d.comb += clkgen.divisor.eq(divisor)
@@ -353,7 +353,7 @@ class MPSSE(wiring.Component):
 import unittest
 
 from glasgow.gateware import simulation_test
-from amaranth.sim import Tick
+from amaranth.sim import Tick, Simulator
 
 # XXX: this has not been updated, obviously
 class MPSSETestbench(Elaboratable):
@@ -376,289 +376,311 @@ class MPSSETestbench(Elaboratable):
     def do_finalize(self):
         self.states = {v: k for k, v in self.dut.fsm.encoding.items()}
 
-    def dut_state(self):
+    async def dut_state(self, ctx):
         state = {v: k for k, v in self.dut.fsm.encoding.items()}
-        return state[(yield self.dut.fsm.state)]
+        return state[ctx.get(self.dut.fsm.state)]
 
-    def write(self, byte):
-        yield self.dut.in_stream.payload.eq(byte)
-        yield self.dut.in_stream.valid.eq(1)
+    async def write(self, ctx, byte):
+        ctx.set(self.dut.in_stream.payload, byte)
+        ctx.set(self.dut.in_stream.valid, 1)
         for _ in range(32 * self.clkdiv):
-            if (yield self.dut.in_stream.ready) == 1:
-                yield Tick()
-                yield self.dut.in_stream.valid.eq(0)
+            if ctx.get(self.dut.in_stream.ready) == 1:
+                await ctx.tick()
+                ctx.set(self.dut.in_stream.valid, 0)
                 return
-            yield Tick()
+            await ctx.tick()
         raise Exception("DUT stuck while writing")
 
-    def read(self):
-        yield self.dut.out_stream.ready.eq(1)
+    async def read(self, ctx):
+        ctx.set(self.dut.out_stream.ready, 1)
         for _ in range(32 * self.clkdiv):
-            if (yield self.dut.out_stream.valid) == 1:
-                byte = (yield self.dut.out_stream.payload)
-                yield Tick()
-                yield self.dut.out_stream.ready.eq(0)
+            if ctx.get(self.dut.out_stream.valid) == 1:
+                byte = ctx.get(self.dut.out_stream.payload)
+                await ctx.tick()
+                ctx.set(self.dut.out_stream.ready, 0)
                 return byte
-            yield Tick()
+            await ctx.tick()
         raise Exception("DUT stuck while reading")
 
-    def _wait_for_tck(self, at_setup=None):
+    async def _wait_for_tck(self, ctx, at_setup=None):
         setup = None
         for _ in range(64 * self.clkdiv):
             if at_setup:
-                setup = (yield from at_setup())
-            tckold = (yield self.tck)
-            yield Tick()
-            tcknew = (yield self.tck)
+                setup = at_setup()
+            tckold = ctx.get(self.tck)
+            await ctx.tick()
+            tcknew = ctx.get(self.tck)
             if tckold != tcknew:
                 break
         if tckold == tcknew:
             raise Exception("DUT ceased driving TCK")
         return setup
 
-    def recv_tdi(self, nbits, pos):
+    async def recv_tdi(self, ctx, nbits, pos):
         bits = 0
         for n in range(nbits * 2):
-            yield from self._wait_for_tck()
-            if (yield self.tck) == pos:
-                bits = (bits << 1) | (yield self.tdi)
+            await self._wait_for_tck(ctx)
+            if ctx.get(self.tck) == pos:
+                bits = (bits << 1) | ctx.get(self.tdi)
         return bits
 
-    def recv_tms(self, nbits, pos):
+    async def recv_tms(self, ctx, nbits, pos):
         bits = 0
         for n in range(nbits * 2):
-            yield from self._wait_for_tck()
-            if (yield self.tck) == pos:
-                bits = (bits << 1) | (yield self.tms)
+            await self._wait_for_tck(ctx)
+            if ctx.get(self.tck) == pos:
+                bits = (bits << 1) | ctx.get(self.tms)
         return bits
 
-    def xfer(self, nbits, out_bits, in_bits, out_pos, in_pos):
+    async def xfer(self, ctx, nbits, out_bits, in_bits, out_pos, in_pos):
         for n in range(nbits * 2):
-            tdiold = (yield from self._wait_for_tck(
-                at_setup=lambda: (yield self.tdi)))
-            tcknew = (yield self.tck)
+            tdiold = await self._wait_for_tck(ctx, at_setup=lambda: ctx.get(self.tdi))
+            tcknew = ctx.get(self.tck)
 
             if in_pos == tcknew:
-                if (yield self.tdi) != tdiold:
-                    yield Tick(); yield Tick(); yield Tick(); yield Tick()
+                if ctx.get(self.tdi) != tdiold:
+                    await ctx.tick().repeat(4)
                     raise Exception("DUT violated setup/hold timings")
 
                 in_bit  = in_bits  & (1 << (nbits - n // 2) - 1)
                 # print(f"{in_bits:0{nbits}b} {in_bit:0{nbits}b} ")
-                if (yield self.tdi) != (in_bit != 0):
-                    yield Tick(); yield Tick(); yield Tick(); yield Tick()
+                if ctx.get(self.tdi) != (in_bit != 0):
+                    await ctx.tick().repeat(4)
                     raise Exception("DUT clocked out bit {} as {} (expected {})"
-                                    .format(n // 2, (yield self.tdi), 1 if in_bit else 0))
+                                    .format(n // 2, ctx.get(self.tdi), 1 if in_bit else 0))
             if out_pos == tcknew:
                 out_bit = out_bits & (1 << (nbits - n // 2) - 1)
-                yield self.tdo.eq(out_bit)
+                ctx.set(self.tdo, out_bit)
 
         for _ in range(16 * self.clkdiv):
-            tckold = (yield self.tck)
-            yield Tick()
-            tcknew = (yield self.tck)
+            tckold = ctx.get(self.tck)
+            await ctx.tick()
+            tcknew = ctx.get(self.tck)
             if tckold != tcknew and in_pos == tcknew:
                 raise Exception("DUT spuriously drives TCK")
 
         return True
 
-    def out_xfer(self, nbits, bits, pos):
-        return self.xfer(nbits, bits, 0, pos, False)
+    async def out_xfer(self, ctx, nbits, bits, pos):
+        return await self.xfer(ctx, nbits, bits, 0, pos, False)
 
-    def in_xfer(self, nbits, bits, pos):
-        return self.xfer(nbits, 0, bits, False, pos)
+    async def in_xfer(self, ctx, nbits, bits, pos):
+        return await self.xfer(ctx, nbits, 0, bits, False, pos)
 
+import functools
+def simulation_test_v2(case=None, **kwargs):
+    def configure_wrapper(case):
+        @functools.wraps(case)
+        def wrapper(self):
+            async def setup_wrapper(ctx):
+                if hasattr(self, "simulationSetUp"):
+                    await self.simulationSetUp(ctx, self.tb)
+                if hasattr(self, "configure"):
+                    await self.configure(ctx, self.tb, **kwargs)
+                await case(self, ctx, self.tb)
+            if isinstance(self.tb, Elaboratable):
+                sim = Simulator(self.tb)
+                with sim.write_vcd("test.vcd"):
+                    sim.add_clock(1e-8)
+                    sim.add_testbench(setup_wrapper)
+                    sim.run()
+        return wrapper
+        
+    if case is None:
+        return configure_wrapper
+    else:
+        return configure_wrapper(case)
 
 class MPSSETestCase(unittest.TestCase):
     def setUp(self):
         self.tb = MPSSETestbench()
 
-    def configure(self, tb):
+    async def configure(self, ctx, tb):
         # speed up tests
-        yield tb.dut.legacy_divisor_en.eq(0)
+        ctx.set(tb.dut.legacy_divisor_en, 0)
 
-    @simulation_test
-    def test_error(self, tb):
-        yield from tb.write(0xFF)
-        self.assertEqual((yield from tb.read()), 0xFA)
-        self.assertEqual((yield from tb.read()), 0xFF)
-        self.assertEqual((yield from tb.dut_state()), "IDLE")
+    @simulation_test_v2
+    async def test_error(self, ctx, tb):
+        await tb.write(ctx, 0xFF)
+        self.assertEqual(await tb.read(ctx), 0xFA)
+        self.assertEqual(await tb.read(ctx), 0xFF)
+        self.assertEqual(await tb.dut_state(ctx), "IDLE")
 
-    @simulation_test
-    def test_gpio_read(self, tb):
-        yield tb.dut.pads_i.eq(0xAA55)
-        yield Tick()
-        yield from tb.write(0x81)
-        self.assertEqual((yield from tb.read()), 0x55)
-        yield from tb.write(0x83)
-        self.assertEqual((yield from tb.read()), 0xAA)
-        self.assertEqual((yield from tb.dut_state()), "IDLE")
+    @simulation_test_v2
+    async def test_gpio_read(self, ctx, tb):
+        ctx.set(tb.dut.pads_i, 0xAA55)
+        await ctx.tick()
+        await tb.write(ctx, 0x81)
+        self.assertEqual(await tb.read(ctx), 0x55)
+        await tb.write(ctx, 0x83)
+        self.assertEqual(await tb.read(ctx), 0xAA)
+        self.assertEqual(await tb.dut_state(ctx), "IDLE")
 
-    @simulation_test
-    def test_gpio_write(self, tb):
-        yield from tb.write(0x80)
-        yield from tb.write(0xA1)
-        yield from tb.write(0x52)
-        self.assertEqual((yield tb.dut.pads_o),  0x00A1)
-        self.assertEqual((yield tb.dut.pads_oe), 0x0052)
-        yield from tb.write(0x82)
-        yield from tb.write(0x7E)
-        yield from tb.write(0x81)
-        self.assertEqual((yield tb.dut.pads_o),  0x7EA1)
-        self.assertEqual((yield tb.dut.pads_oe), 0x8152)
-        self.assertEqual((yield from tb.dut_state()), "IDLE")
+    @simulation_test_v2
+    async def test_gpio_write(self, ctx, tb):
+        await tb.write(ctx, 0x80)
+        await tb.write(ctx, 0xA1)
+        await tb.write(ctx, 0x52)
+        self.assertEqual(ctx.get(tb.dut.pads_o),  0x00A0) # TCK is involved here!
+        self.assertEqual(ctx.get(tb.dut.pads_oe), 0x0052)
+        await tb.write(ctx, 0x82)
+        await tb.write(ctx, 0x7E)
+        await tb.write(ctx, 0x81)
+        self.assertEqual(ctx.get(tb.dut.pads_o),  0x7EA0)
+        self.assertEqual(ctx.get(tb.dut.pads_oe), 0x8152)
+        self.assertEqual(await tb.dut_state(ctx), "IDLE")
 
-    @simulation_test
-    def test_bits_write(self, tb):
-        yield from tb.write(0x12)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
-        yield from tb.write(0x55)
-        self.assertEqual((yield from tb.recv_tdi(5, pos=True)), 0x0A)
+    @simulation_test_v2
+    async def test_bits_write(self, ctx, tb):
+        await tb.write(ctx, 0x12)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
+        await tb.write(ctx, 0x55)
+        self.assertEqual(await tb.recv_tdi(ctx, 5, pos=True), 0x0A)
 
-    @simulation_test
-    def test_clk_bits(self, tb):
-        yield from tb.write(0x8E)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
-        self.assertEqual((yield from tb.recv_tdi(6, pos=True)), 0x00)
-        self.assertEqual((yield tb.tck), 0)
-        self.assertEqual((yield from tb.dut_state()), "IDLE")
+    @simulation_test_v2
+    async def test_clk_bits(self, ctx, tb):
+        await tb.write(ctx, 0x8E)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
+        self.assertEqual(await tb.recv_tdi(ctx, 6, pos=True), 0x00)
+        self.assertEqual(ctx.get(tb.tck), 0)
+        self.assertEqual(await tb.dut_state(ctx), "IDLE")
 
-    @simulation_test
-    def test_clk_bytes(self, tb):
-        yield from tb.write(0x8F)
-        yield from tb.write(5)
-        yield from tb.write(0)
-        self.assertEqual((yield tb.dut.position.lobyte), 5)
-        self.assertEqual((yield tb.dut.position.hibyte), 0)
-        self.assertEqual((yield from tb.recv_tdi(48, pos=True)), 0x00)
-        self.assertEqual((yield tb.tck), 0)
-        self.assertEqual((yield from tb.dut_state()), "IDLE")
+    @simulation_test_v2
+    async def test_clk_bytes(self, ctx, tb):
+        await tb.write(ctx, 0x8F)
+        await tb.write(ctx, 5)
+        await tb.write(ctx, 0)
+        self.assertEqual(ctx.get(tb.dut.position.lobyte), 5)
+        self.assertEqual(ctx.get(tb.dut.position.hibyte), 0)
+        self.assertEqual(await tb.recv_tdi(ctx, 48, pos=True), 0x00)
+        self.assertEqual(ctx.get(tb.tck), 0)
+        self.assertEqual(await tb.dut_state(ctx), "IDLE")
 
-    @simulation_test
-    def test_bits_read(self, tb):
-        yield from tb.write(0x22)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
-        self.assertEqual((yield from tb.read()), 0x00)
+    @simulation_test_v2
+    async def test_bits_read(self, ctx, tb):
+        await tb.write(ctx, 0x22)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
+        self.assertEqual(await tb.read(ctx), 0x00)
 
-    @simulation_test
-    def test_legacy_dividor(self, tb):
+    @simulation_test_v2
+    async def test_legacy_dividor(self, ctx, tb):
         # restore pristine MPSSE state
-        yield tb.dut.legacy_divisor_en.eq(0)
+        ctx.set(tb.dut.legacy_divisor_en, 0)
         self.tb.clkdiv = 5
 
         # works
-        yield from tb.write(0x22)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
-        self.assertEqual((yield from tb.read()), 0x00)
+        await tb.write(ctx, 0x22)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
+        self.assertEqual(await tb.read(ctx), 0x00)
 
         # works
-        yield from tb.write(0x8A)
+        await tb.write(ctx, 0x8A)
         self.tb.clkdiv = 1
-        yield from tb.write(0x22)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
-        self.assertEqual((yield from tb.read()), 0x00)
+        await tb.write(ctx, 0x22)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
+        self.assertEqual(await tb.read(ctx), 0x00)
 
         # fails - timeout
-        yield from tb.write(0x8B)
+        await tb.write(ctx, 0x8B)
         self.tb.clkdiv = 1
-        yield from tb.write(0x22)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
+        await tb.write(ctx, 0x22)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
         with self.assertRaises(Exception):
-            yield from tb.read()
+            await tb.read(ctx)
 
-    @simulation_test
-    def test_bits_read_write(self, tb):
-        yield from tb.write(0x84)
-        yield from tb.write(0x33)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
-        yield from tb.write(0x55)
-        self.assertEqual((yield from tb.recv_tdi(5, pos=True)), 0x0A)
-        self.assertEqual((yield from tb.read()), 0x15) # non-negative read clock
+    @simulation_test_v2
+    async def test_bits_read_write(self, ctx, tb):
+        await tb.write(ctx, 0x84)
+        await tb.write(ctx, 0x33)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
+        await tb.write(ctx, 0x55)
+        self.assertEqual(await tb.recv_tdi(ctx, 5, pos=True), 0x0A)
+        self.assertEqual(await tb.read(ctx), 0x15) # non-negative read clock
 
-    @simulation_test
-    def test_tms_write(self, tb):
-        yield from tb.write(0x4A)
-        yield from tb.write(5)
-        self.assertEqual((yield tb.dut.position.bit), 5)
-        yield from tb.write(0x55)
-        self.assertEqual((yield from tb.recv_tms(5, pos=True)), 0x15)
+    @simulation_test_v2
+    async def test_tms_write(self, ctx, tb):
+        await tb.write(ctx, 0x4A)
+        await tb.write(ctx, 5)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 5)
+        await tb.write(ctx, 0x55)
+        self.assertEqual(await tb.recv_tms(ctx, 5, pos=True), 0x15)
 
-    @simulation_test
-    def test_invalid_tms_commands(self, tb):
-        yield from tb.write(0x5A)
-        self.assertEqual((yield from tb.dut_state()), "ERROR")
-        yield from tb.read()
-        yield from tb.read()
-        self.assertEqual((yield from tb.dut_state()), "IDLE")
-        yield from tb.write(0x42)
-        self.assertEqual((yield from tb.dut_state()), "ERROR")
-        yield from tb.read()
-        yield from tb.read()
-        yield from tb.write(0x68)
-        self.assertEqual((yield from tb.dut_state()), "ERROR")
-        yield from tb.read()
-        yield from tb.read()
+    @simulation_test_v2
+    async def test_invalid_tms_commands(self, ctx, tb):
+        await tb.write(ctx, 0x5A)
+        self.assertEqual(await tb.dut_state(ctx), "ERROR")
+        await tb.read(ctx)
+        await tb.read(ctx)
+        self.assertEqual(await tb.dut_state(ctx), "IDLE")
+        await tb.write(ctx, 0x42)
+        self.assertEqual(await tb.dut_state(ctx), "ERROR")
+        await tb.read(ctx)
+        await tb.read(ctx)
+        await tb.write(ctx, 0x68)
+        self.assertEqual(await tb.dut_state(ctx), "ERROR")
+        await tb.read(ctx)
+        await tb.read(ctx)
 
-    @simulation_test
-    def test_hibyte_lobyte_write(self, tb):
-        yield from tb.write(0x10)
-        yield from tb.write(0x05)
-        self.assertEqual((yield tb.dut.position.lobyte), 0x05)
-        yield from tb.write(0x11)
-        self.assertEqual((yield tb.dut.position.hibyte), 0x11)
+    @simulation_test_v2
+    async def test_hibyte_lobyte_write(self, ctx, tb):
+        await tb.write(ctx, 0x10)
+        await tb.write(ctx, 0x05)
+        self.assertEqual(ctx.get(tb.dut.position.lobyte), 0x05)
+        await tb.write(ctx, 0x11)
+        self.assertEqual(ctx.get(tb.dut.position.hibyte), 0x11)
 
-    @simulation_test
-    def test_divisor_write(self, tb):
-        yield from tb.write(0x86)
-        yield from tb.write(0x34)
-        yield from tb.write(0x12)
-        self.assertEqual((yield tb.dut.divisor), 0x1234)
-        self.assertEqual((yield from tb.dut_state()), "IDLE")
+    @simulation_test_v2
+    async def test_divisor_write(self, ctx, tb):
+        await tb.write(ctx, 0x86)
+        await tb.write(ctx, 0x34)
+        await tb.write(ctx, 0x12)
+        self.assertEqual(ctx.get(tb.dut.divisor), 0x1234)
+        self.assertEqual(await tb.dut_state(ctx), "IDLE")
 
-    def write_single_byte(self, tb, pos):
-        yield from tb.write(0x80)
+    async def write_single_byte(self, ctx, tb, pos):
+        await tb.write(ctx, 0x80)
         if pos:
-            yield from tb.write(0b0001)
+            await tb.write(ctx, 0b0001)
         else:
-            yield from tb.write(0b0000)
-        yield from tb.write(0b1101)
+            await tb.write(ctx, 0b0000)
+        await tb.write(ctx, 0b1101)
 
         if pos:
-            yield from tb.write(0x10)
+            await tb.write(ctx, 0x10)
         else:
-            yield from tb.write(0x11)
-        yield from tb.write(0x00)
-        yield from tb.write(0x00)
-        yield from tb.write(0xA5)
-        self.assertTrue((yield from tb.in_xfer(8, 0b10100101, not pos)))
+            await tb.write(ctx, 0x11)
+        await tb.write(ctx, 0x00)
+        await tb.write(ctx, 0x00)
+        await tb.write(ctx, 0xA5)
+        self.assertTrue(await tb.in_xfer(ctx, 8, 0b10100101, not pos))
 
-    @simulation_test
-    def test_write_single_byte_clkpos(self, tb):
-        yield tb.dut.divisor.eq(1)
-        yield from self.write_single_byte(tb, pos=True)
+    @simulation_test_v2
+    async def test_write_single_byte_clkpos(self, ctx, tb):
+        ctx.set(tb.dut.divisor, 1)
+        await self.write_single_byte(ctx, tb, pos=True)
 
-    @simulation_test
-    def test_write_single_byte_clkneg(self, tb):
-        yield tb.dut.divisor.eq(1)
-        yield from self.write_single_byte(tb, pos=False)
+    @simulation_test_v2
+    async def test_write_single_byte_clkneg(self, ctx, tb):
+        ctx.set(tb.dut.divisor, 1)
+        await self.write_single_byte(ctx, tb, pos=False)
 
-    @simulation_test
-    def test_write_single_byte_clkneg_fast(self, tb):
-        yield from self.write_single_byte(tb, pos=False)
+    @simulation_test_v2
+    async def test_write_single_byte_clkneg_fast(self, ctx, tb):
+        await self.write_single_byte(ctx, tb, pos=False)
 
-    @simulation_test
-    def test_write_single_byte_clkwrong(self, tb):
-        yield from tb.write(0x10) # +ve, but we start from tck=0
-        yield from tb.write(0x00)
-        yield from tb.write(0x00)
-        yield from tb.write(0xA5)
-        self.assertEqual((yield from tb.recv_tdi(8, pos=False)), 0xA5)
-        yield Tick()
-        self.assertEqual((yield tb.tck), 0)
+    @simulation_test_v2
+    async def test_write_single_byte_clkwrong(self, ctx, tb):
+        await tb.write(ctx, 0x10) # +ve, but we start from tck=0
+        await tb.write(ctx, 0x00)
+        await tb.write(ctx, 0x00)
+        await tb.write(ctx, 0xA5)
+        self.assertEqual(await tb.recv_tdi(ctx, 8, pos=False), 0xA5)
+        await ctx.tick()
+        self.assertEqual(ctx.get(tb.tck), 0)
