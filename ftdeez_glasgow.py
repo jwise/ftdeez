@@ -4,6 +4,7 @@ import asyncio
 import fakeusb1
 import pyusbip
 import ftdeez
+from mpsse import MPSSE
 
 import argparse
 
@@ -206,7 +207,6 @@ class UartTx(wiring.Component):
         return m
 
 
-
 class GlasgowD2xxComponent(wiring.Component):
     rx_stream: Out(stream.Signature(8))
     tx_stream: In(stream.Signature(8))
@@ -214,6 +214,7 @@ class GlasgowD2xxComponent(wiring.Component):
     modem_line_status: Out(16)
     ack_status: In(16)
     modem_ctrl: In(8)
+    bit_mode: In(16)
     
     def __init__(self, ports):
         self.ports = ports # ideally, this would be a portgroup
@@ -247,18 +248,31 @@ class GlasgowD2xxComponent(wiring.Component):
         # UART TODO: inject incorrect framing character on framing error
         # UART TODO: hook up data bits, stop bits, parity
         m.submodules.uart_rx = uart_rx = UartRx()
-        wiring.connect(m, uart_rx.rx_stream, flipped(self.rx_stream))
         m.d.comb += uart_rx.bit_cyc.eq(self.bit_cyc)
         m.d.comb += uart_rx.data_bits.eq(UartDataBits.Bits8)
         m.d.comb += uart_rx.stop_bits.eq(UartStopBits.Bits1)
         m.d.comb += uart_rx.parity.eq(UartParity.Off)
 
         m.submodules.uart_tx = uart_tx = UartTx()
-        wiring.connect(m, uart_tx.tx_stream, flipped(self.tx_stream))
         m.d.comb += uart_tx.bit_cyc.eq(self.bit_cyc)
         m.d.comb += uart_tx.data_bits.eq(UartDataBits.Bits8)
         m.d.comb += uart_tx.stop_bits.eq(UartStopBits.Bits1)
         m.d.comb += uart_tx.parity.eq(UartParity.Off)
+
+        with m.If(self.bit_mode[8:16] == 0x00): # base mode
+            wiring.connect(m, uart_rx.rx_stream, flipped(self.rx_stream))
+            wiring.connect(m, uart_tx.tx_stream, flipped(self.tx_stream))
+
+            m.d.comb += ports_oe[0].eq(1)
+            m.d.comb += ports_o[0].eq(uart_tx.tx)
+
+            m.d.comb += uart_rx.rx.eq(ports_i[1])
+
+            m.d.comb += ports_oe[2].eq(1) # RTSn
+            m.d.comb += ports_o[2].eq(~self.modem_ctrl[1]) # RTSn
+
+            m.d.comb += ports_oe[4].eq(1) # DTRn
+            m.d.comb += ports_o[4].eq(~self.modem_ctrl[0]) # DTRn
         
         # XXX LATER: make this be muxed
         ovf = Signal()
@@ -277,18 +291,17 @@ class GlasgowD2xxComponent(wiring.Component):
         m.d.sync += perr.eq((perr | perr_set) & ~perr_clr)
         m.d.sync += ferr.eq((ferr | ferr_set) & ~ferr_clr)
 
+        ### MPSSE SPECIFIC BITS ###
+        m.submodules.mpsse = mpsse = MPSSE()
+        with m.If(self.bit_mode[8:16] == 0x02): # MPSSE mode
+            wiring.connect(m, mpsse.in_stream, flipped(self.tx_stream))
+            wiring.connect(m, mpsse.out_stream, flipped(self.rx_stream))
+            
+            m.d.comb += ports_oe.eq(mpsse.pads_oe)
+            m.d.comb += ports_o.eq(mpsse.pads_o)
+            m.d.comb += mpsse.pads_i.eq(ports_i)
+
         # PORTS
-        m.d.comb += ports_oe[0].eq(1)
-        m.d.comb += ports_o[0].eq(uart_tx.tx)
-
-        m.d.comb += uart_rx.rx.eq(ports_i[1])
-
-        m.d.comb += ports_oe[2].eq(1) # RTSn
-        m.d.comb += ports_o[2].eq(~self.modem_ctrl[1]) # RTSn
-
-        m.d.comb += ports_oe[4].eq(1) # DTRn
-        m.d.comb += ports_o[4].eq(~self.modem_ctrl[0]) # DTRn
-        
         m.d.comb += self.modem_line_status[8].eq(1)
         m.d.comb += self.modem_line_status[12].eq(~ports_i[3]) # CTSn
         m.d.comb += self.modem_line_status[13].eq(~ports_i[5]) # DSRn
@@ -321,6 +334,7 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
         self._modem_line_status = assembly.add_ro_register(component.modem_line_status)
         self._ack_status = assembly.add_rw_register(component.ack_status)
         self._modem_ctrl = assembly.add_rw_register(component.modem_ctrl)
+        self._bit_mode = assembly.add_rw_register(component.bit_mode)
         
         self._sys_clk_period = assembly.sys_clk_period
         print(f"sys_clk_period = {assembly.sys_clk_period}")
@@ -369,6 +383,10 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
             # handle latency timer flush character!
         
         self.put_infifo(buf)
+    
+    async def set_bitmode(self, wValue):
+        self._logger.info('setting bit mode up')
+        await self._bit_mode.set(wValue)
     
     def set_baud_rate(self, divisor):
         DIVISOR_FRAC_LUT = {

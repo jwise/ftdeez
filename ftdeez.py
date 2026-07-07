@@ -17,10 +17,12 @@ _logger = logging.getLogger("ftdeez")
 class BaseD2xxChannel:
     def __init__(self):
         self.latency_timer = 0x10
+        self.inactivity_period = 0.04 # "kernel alleges device will send an update packet every 40ms even with no activity"
         self._logger = logging.getLogger(f"ftdeez.BaseD2xxChannel.{id(self)}")
         self._in_lock = asyncio.Lock()
         self._in_cvar = asyncio.Condition()
         self._in_latency_timer_start = None
+        self._inactivity_timer_start = 0
         self._in_event = False
         self._in_buf = bytearray()
         self._out_buf = bytearray()
@@ -70,7 +72,7 @@ class BaseD2xxChannel:
     def set_error_char(self, wValue):
         pass
     
-    def set_bitmode(self, wValue):
+    async def set_bitmode(self, wValue):
         pass
 
     async def put_infifo(self, buf):
@@ -105,6 +107,12 @@ class BaseD2xxChannel:
                         self._logger.debug("returning IN packet due to latency timer expiring")
                         break
                     
+                    inactivity_timeout_remaining = (self._inactivity_timer_start + self.inactivity_period) - time.time()
+                    if inactivity_timeout_remaining < 0:
+                        self._logger.debug("returning IN packet due to inactivity timer expiring")
+                        break
+                    timeout_remaining = min(inactivity_timeout_remaining, timeout_remaining)
+                        
                     try:
                         await asyncio.wait_for(self._in_cvar.wait(), timeout_remaining)
                     except TimeoutError:
@@ -115,7 +123,8 @@ class BaseD2xxChannel:
                 
                 bs = self._in_buf[:wLength - 2]
                 self._in_buf[:wLength - 2] = b''
-                
+            
+            self._inactivity_timer_start = time.time()
             return struct.pack(">H", await self.get_modem_status()) + bs
     
     async def bulk_out(self, buf):
@@ -225,7 +234,7 @@ class Ft2232Device(fakeusb1.BaseFakeUSBDevice):
                 return 0
             case (0x40, 0x0b): # SET_BITMODE
                 self._logger.debug(f"SET_BITMODE channel {wIndex - 1} -> 0x{wValue:04x}")
-                self.channels[wIndex - 1].set_bitmode(wValue)
+                await self.channels[wIndex - 1].set_bitmode(wValue)
                 return 0
             case (0x40, 0x21): # VENDOR_CMD_SET
                 self._logger.error("VENDOR_CMD_SET")
