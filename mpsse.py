@@ -231,10 +231,19 @@ class MPSSE(wiring.Component):
                     m.d.sync += loopback.eq(1)
                 with m.Elif(curr_cmd == 0x85):
                     m.d.sync += loopback.eq(0)
+                with m.Elif(curr_cmd == 0x87):
+                    # Send immediate: flush latency timer. XXX: funnel this up
+                    pass
                 with m.Elif(curr_cmd == 0x8A):
                     m.d.sync += legacy_divisor_en.eq(0)
                 with m.Elif(curr_cmd == 0x8B):
                     m.d.sync += legacy_divisor_en.eq(1)
+                with m.Elif(curr_cmd == 0x8D):
+                    # disable 3-phase clocking -- we definitely support that
+                    pass
+                with m.Elif(curr_cmd == 0x97):
+                    # disable adaptive clocking -- we definitely support that
+                    pass
                 with m.Else():
                     m.next = "ERROR"
         
