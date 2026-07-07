@@ -106,6 +106,8 @@ class MPSSE(wiring.Component):
     pads_o: Out(16)
     pads_oe: Out(16)
     
+    reset: In(1)
+    
     def elaborate(self, platform):
         m = Module()
         
@@ -180,12 +182,20 @@ class MPSSE(wiring.Component):
             m.d.comb += self.out_stream.payload.eq(out)
             with m.If(self.out_stream.ready):
                 yield
+        
+        @contextmanager
+        def _resettable():
+            yield
+            with m.If(self.reset):
+                m.d.comb += self.out_stream.valid.eq(0)
+                m.d.comb += self.in_stream.ready.eq(1)
+                m.next = "IDLE"
 
         with m.FSM() as fsm:
             self.fsm = fsm
             m.d.comb += curr_cmd.eq(pend_cmd) # overridden in IDLE only
             
-            with m.State("IDLE"), _consume_input():
+            with m.State("IDLE"), _resettable(), _consume_input():
                 m.d.comb += curr_cmd.eq(self.in_stream.payload)
                 m.d.sync += pend_cmd.eq(self.in_stream.payload)
                 
@@ -237,16 +247,16 @@ class MPSSE(wiring.Component):
                 with m.Else():
                     m.next = "SHIFT-SETUP"
 
-            with m.State("SHIFT-LENGTH-LOBYTE"), _consume_input():
+            with m.State("SHIFT-LENGTH-LOBYTE"), _resettable(), _consume_input():
                 m.d.sync += position.bit.eq(7),
                 m.d.sync += position.lobyte.eq(self.in_stream.payload)
                 m.next = "SHIFT-LENGTH-HIBYTE"
 
-            with m.State("SHIFT-LENGTH-HIBYTE"), _consume_input():
+            with m.State("SHIFT-LENGTH-HIBYTE"), _resettable(), _consume_input():
                 m.d.sync += Cat(position.lobyte, position.hibyte).eq(Cat(position.lobyte, self.in_stream.payload) - 1)
                 begin_shifting()
 
-            with m.State("SHIFT-LENGTH-BITS"), _consume_input():
+            with m.State("SHIFT-LENGTH-BITS"), _resettable(), _consume_input():
                 m.d.sync += position.bit.eq(self.in_stream.payload)
                 begin_shifting()
 
@@ -272,7 +282,7 @@ class MPSSE(wiring.Component):
                              clkgen.tckneg & ~shift_cmd.rneg),
             ]
 
-            with m.State("SHIFT-LOAD"), _consume_input():
+            with m.State("SHIFT-LOAD"), _resettable(), _consume_input():
                 m.d.sync += bits_in.eq(rx_data_be << 1),
                 with m.If(shift_cmd.tdi):
                     m.d.sync += pad_o_tdi.eq(rx_data_be[7])
@@ -280,13 +290,13 @@ class MPSSE(wiring.Component):
                     m.d.sync += pad_o_tms.eq(rx_data_be[7])
                 m.next = "SHIFT-SETUP"
 
-            with m.State("SHIFT-SETUP"):
+            with m.State("SHIFT-SETUP"), _resettable():
                 m.d.comb += clkgen.clken.eq(1)
                 m.d.comb += clkgen.tcken.eq(clkgen.clkneg)
                 with m.If(clkgen.clkneg):
                     m.next = "SHIFT-CLOCK"
 
-            with m.State("SHIFT-CLOCK"):
+            with m.State("SHIFT-CLOCK"), _resettable():
                 m.d.comb += clkgen.clken.eq(1)
                 m.d.comb += clkgen.tcken.eq(1)
                 with m.If(output_setup):
@@ -310,7 +320,7 @@ class MPSSE(wiring.Component):
                             m.next = "IDLE"
 
             # XXX: it woudl be nice to also be able to grab the input data on the next clock
-            with m.State("SHIFT-REPORT"):
+            with m.State("SHIFT-REPORT"), _resettable():
                 with _produce_output(bits_out):
                     with m.If((position.lobyte != 0xFF) & (position.hibyte != 0xFF)):
                         begin_shifting()
@@ -319,11 +329,11 @@ class MPSSE(wiring.Component):
 
             # GPIO commands
 
-            with m.State("GPIO-READ-I"):
+            with m.State("GPIO-READ-I"), _resettable():
                 with _produce_output(Mux(gpio_cmd_adr == 0, self.pads_i[0:8], self.pads_i[8:16])):
                     m.next = "IDLE"
 
-            with m.State("GPIO-WRITE-O"), _consume_input():
+            with m.State("GPIO-WRITE-O"), _resettable(), _consume_input():
                 with m.If(gpio_cmd_adr == 0):
                     m.d.comb += clkgen.tck_override.eq(1)
                     m.d.comb += clkgen.tck_override_value.eq(self.in_stream.payload[0])
@@ -332,7 +342,7 @@ class MPSSE(wiring.Component):
                     m.d.sync += self.pads_o[8:16].eq(self.in_stream.payload)
                 m.next = "GPIO-WRITE-OE"
 
-            with m.State("GPIO-WRITE-OE"), _consume_input():
+            with m.State("GPIO-WRITE-OE"), _resettable(), _consume_input():
                 with m.If(gpio_cmd_adr == 0):
                     m.d.sync += self.pads_oe[0:8].eq(self.in_stream.payload)
                 with m.Else():
@@ -341,22 +351,23 @@ class MPSSE(wiring.Component):
 
             # Divisor subcommand
 
-            with m.State("DIVISOR-LOBYTE"), _consume_input():
+            with m.State("DIVISOR-LOBYTE"), _resettable(), _consume_input():
                 m.d.sync += divisor[0:8].eq(self.in_stream.payload)
                 m.next = "DIVISOR-HIBYTE"
 
-            with m.State("DIVISOR-HIBYTE"), _consume_input():
+            with m.State("DIVISOR-HIBYTE"), _resettable(), _consume_input():
                 m.d.sync += divisor[8:16].eq(self.in_stream.payload),
                 m.next = "IDLE"
 
             # Error "subcommand"
-            with m.State("ERROR"):
+            with m.State("ERROR"), _resettable():
                 with _produce_output(0xFA):
                     m.next = "ERROR-DESC"
 
-            with m.State("ERROR-DESC"):
+            with m.State("ERROR-DESC"), _resettable():
                 with _produce_output(pend_cmd):
                     m.next = "IDLE"
+            
         
         return m
 

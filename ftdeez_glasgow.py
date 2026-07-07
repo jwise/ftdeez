@@ -300,6 +300,9 @@ class GlasgowD2xxComponent(wiring.Component):
             m.d.comb += ports_oe.eq(mpsse.pads_oe)
             m.d.comb += ports_o.eq(mpsse.pads_o)
             m.d.comb += mpsse.pads_i.eq(ports_i)
+        
+        # XXX: also FIFO reset opcode from host!
+        m.d.comb += mpsse.reset.eq(self.bit_mode[8:16] != 0x02)
 
         # PORTS
         m.d.comb += self.modem_line_status[8].eq(1)
