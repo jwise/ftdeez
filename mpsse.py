@@ -262,7 +262,7 @@ class MPSSE(wiring.Component):
                 m.next = "SHIFT-LENGTH-HIBYTE"
 
             with m.State("SHIFT-LENGTH-HIBYTE"), _resettable(), _consume_input():
-                m.d.sync += Cat(position.lobyte, position.hibyte).eq(Cat(position.lobyte, self.in_stream.payload) - 1)
+                m.d.sync += position.hibyte.eq(self.in_stream.payload)
                 begin_shifting()
 
             with m.State("SHIFT-LENGTH-BITS"), _resettable(), _consume_input():
@@ -590,7 +590,7 @@ class MPSSETestCase(unittest.TestCase):
         await tb.write(ctx, 0x01) # divL = 0x01
         await tb.write(ctx, 0x00) # divH = 0x00
         await tb.write(ctx, 0x10) # MPSSE_DO_WRITE
-        await tb.write(ctx, 3)
+        await tb.write(ctx, 2)
         await tb.write(ctx, 0)
         self.assertEqual(ctx.get(tb.dut.position.lobyte), 2)
         self.assertEqual(ctx.get(tb.dut.position.hibyte), 0)
@@ -615,7 +615,7 @@ class MPSSETestCase(unittest.TestCase):
     @simulation_test_v2
     async def test_clk_bytes(self, ctx, tb):
         await tb.write(ctx, 0x8F)
-        await tb.write(ctx, 5)
+        await tb.write(ctx, 4)
         await tb.write(ctx, 0)
         self.assertEqual(ctx.get(tb.dut.position.lobyte), 4)
         self.assertEqual(ctx.get(tb.dut.position.hibyte), 0)
