@@ -356,7 +356,16 @@ class MPSSE(wiring.Component):
                     m.d.sync += self.pads_oe[0:8].eq(self.in_stream.payload)
                 with m.Else():
                     m.d.sync += self.pads_oe[8:16].eq(self.in_stream.payload)
-                m.next = "IDLE"
+                # XXX: this should be programmed elsewhere rather than a fixed 48MHz sysclk
+                # delay on this opcode should be 5us, as per https://github.com/eblot/pyftdi/blob/25d77b02960dd42c018ac7c463b6a5500b95b5b6/pyftdi/ftdi.py#L1095
+                m.d.sync += position.as_value().eq(240)
+                m.next = "GPIO-WRITE-DELAY"
+            
+            with m.State("GPIO-WRITE-DELAY"), _resettable():
+                with m.If(position.as_value() == 0):
+                    m.next = "IDLE"
+                with m.Else():
+                    m.d.sync += position.as_value().eq(position.as_value() - 1)
 
             # Divisor subcommand
 

@@ -362,7 +362,6 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
                     case 'pd':
                         pulls[pin] = 'low'
 
-        print(f"use_pulls {pulls}")
         assembly.use_pulls(pulls)
         portgroup = assembly.add_port_group(**grp)
         
