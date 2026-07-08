@@ -19,7 +19,7 @@ ctrl.configure('ftdi://ftdi:2232:123456/1')
 
 spi = ctrl.get_port(cs = 0, freq = 9600, mode = 0)
 
-b = bitarray('11111111111')
+b = bitarray('1111')
 
 # This is obviously extremely hokey: there are (completely legal, by SPI
 # protocol!) bit time gaps between each written 'byte', which do not align
@@ -37,4 +37,4 @@ for bb in b"Hello, world! Hello, world! Hello, world!":
 
 print(b.tobytes())
 
-spi.exchange(b.tobytes())
+spi.write(b.tobytes())

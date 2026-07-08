@@ -216,8 +216,9 @@ class GlasgowD2xxComponent(wiring.Component):
     modem_ctrl: In(8)
     bit_mode: In(16)
     
-    def __init__(self, ports):
-        self.ports = ports # ideally, this would be a portgroup
+    def __init__(self, portgroup, pins):
+        self.portgroup = portgroup
+        self.pins = pins
         
         super().__init__()
     
@@ -229,16 +230,36 @@ class GlasgowD2xxComponent(wiring.Component):
         ports_o = Signal(16)
         ports_oe = Signal(16)
         
+        buffers = {}
+        for pin,_ in self.pins:
+            if not pin or pin in buffers:
+                continue
+            buffers[pin] = io.Buffer("io", self.portgroup[pin])
+            m.submodules += buffers[pin]
+            m.d.comb += buffers[pin].oe.eq(0) # will be overridden later
+        
         for p in range(16):
-            if not self.ports[f"p{p}"]:
+            pin, params = self.pins[p]
+            if not pin:
                 ports_i[p].eq(1)
                 continue
-            buffer = io.Buffer("io", self.ports[f"p{p}"])
-            m.submodules += buffer
-            m.submodules += FFSynchronizer(buffer.i, ports_i[p], init=1)
-            m.d.comb += buffer.o.eq(ports_o[p])
-            m.d.comb += buffer.oe.eq(ports_oe[p])
-
+            
+            is_input_only = False
+            has_ff = True
+            for param in params:
+                match param:
+                    case 'i':
+                        is_input_only = True
+                    case 'noff':
+                        has_ff = False 
+            
+            if not is_input_only:
+                m.d.comb += buffers[pin].o.eq(ports_o[p])
+                m.d.comb += buffers[pin].oe.eq(ports_oe[p])
+            if has_ff: # XXX: maybe the nonsynchronized version should go to MPSSE, synchronized version to UART?
+                m.submodules += FFSynchronizer(buffers[pin].i, ports_i[p], init=1)
+            else:
+                m.d.comb += ports_i[p].eq(buffers[pin].i)
 
         ### UART SPECIFIC BITS ###
         # UART TODO: support BREAK mode
@@ -276,15 +297,15 @@ class GlasgowD2xxComponent(wiring.Component):
         
         # XXX LATER: make this be muxed
         ovf = Signal()
-        ovf_set = uart_rx.ovf
+        ovf_set = uart_rx.ovf & (self.bit_mode[8:16] == 0x00)
         ovf_clr = self.ack_status[1]
         
         perr = Signal()
-        perr_set = uart_rx.perr
+        perr_set = uart_rx.perr & (self.bit_mode[8:16] == 0x00)
         perr_clr = self.ack_status[2]
         
         ferr = Signal()
-        ferr_set = uart_rx.ferr
+        ferr_set = uart_rx.ferr & (self.bit_mode[8:16] == 0x00)
         ferr_clr = self.ack_status[3]
         
         m.d.sync +=  ovf.eq(( ovf |  ovf_set) & ~ ovf_clr)
@@ -326,12 +347,27 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
     # supports only UART mode for now, and only barely that
     def __init__(self, assembly, pins):
         super().__init__()
-        
+
+        pulls = {}        
         grp = {}
-        for n,p in enumerate(pins):
-            grp[f"p{n}"] = p
-        ports = assembly.add_port_group(**grp)
-        component = assembly.add_submodule(GlasgowD2xxComponent(ports))
+        for n,(pin,params) in enumerate(pins):
+            if not pin:
+                continue
+                
+            grp[f"{pin}"] = pin
+            for param in params:
+                match param:
+                    case 'pu':
+                        pulls[pin] = 'high'
+                    case 'pd':
+                        pulls[pin] = 'low'
+
+        print(f"use_pulls {pulls}")
+        assembly.use_pulls(pulls)
+        portgroup = assembly.add_port_group(**grp)
+        
+        component = assembly.add_submodule(GlasgowD2xxComponent(portgroup, pins))
+
         self._pipe = assembly.add_inout_pipe(component.rx_stream, component.tx_stream)
         self._bit_cyc = assembly.add_rw_register(component.bit_cyc)
         self._modem_line_status = assembly.add_ro_register(component.modem_line_status)
@@ -446,15 +482,39 @@ async def main():
         if len(pins) > 16:
             parser.error('channel had too many pins (a real D2xx has 8 pins of DBUS and 8 pins of CBUS)')
         
+        out_pins = []
         for pin in pins:
+            if pin == '':
+                out_pins.append((None,[]))
+                continue
+            
+            params = []
+            if '=' in pin:
+                pin,params = pin.split('=')
+                params = params.split('+')
+            
             if pin not in ['A0', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'B0', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', '']:
                 parser.error(f"invalid pin assignment {pin}")
+
+            for param in params:
+                match param:
+                    case 'i':
+                        pass
+                    case 'noff':
+                        pass
+                    case 'pu':
+                        pass
+                    case 'pd':
+                        pass
+                    case _:
+                        parser.error(f"unknown pin parameter {param} on pin {pin}")
+
+            out_pins.append((pin, params))
         
-        pins = [pin if pin != '' else None for pin in pins]
-        if len(pins) < 16:
-            pins += [None] * (16 - len(pins))
+        if len(out_pins) < 16:
+            out_pins += [(None,[])] * (16 - len(out_pins))
         
-        channels.append(GlasgowD2xxChannel(assembly, pins))
+        channels.append(GlasgowD2xxChannel(assembly, out_pins))
 
     dev = ftdeez.Ft2232Device(channels=channels)
     usbctx = fakeusb1.FakeUSBContext(devices=[dev])

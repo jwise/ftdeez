@@ -14,6 +14,7 @@ import pyftdi.i2c
 
 i2c = pyftdi.i2c.I2cController()
 i2c.configure('ftdi://ftdi:2232:123456/1', frequency=50000)
-port = i2c.get_port(0x30)
-port.write(b'')
-port.write(b'')
+port_30 = i2c.get_port(0x30)
+port_34 = i2c.get_port(0x34)
+print(port_30.write(b'abcd'))
+print(port_34.write(b'abcd'))
