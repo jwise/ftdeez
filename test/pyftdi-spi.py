@@ -15,7 +15,7 @@ from bitarray import bitarray
 import pyftdi.spi
 
 ctrl = pyftdi.spi.SpiController()
-ctrl.configure('ftdi://ftdi:2232:123456/1')
+ctrl.configure('ftdi://::ftdeez/1')
 
 spi = ctrl.get_port(cs = 0, freq = 9600, mode = 0)
 

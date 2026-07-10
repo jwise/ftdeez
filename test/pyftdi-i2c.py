@@ -13,7 +13,7 @@ FtdiLogger.set_level(logging.DEBUG)
 import pyftdi.i2c
 
 i2c = pyftdi.i2c.I2cController()
-i2c.configure('ftdi://ftdi:2232:123456/1', frequency=50000)
+i2c.configure('ftdi://::ftdeez/1', frequency=50000)
 
 STATUS = 0x00
 STATUS_HW_ID = 0x01

@@ -375,7 +375,6 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
         self._bit_mode = assembly.add_rw_register(component.bit_mode)
         
         self._sys_clk_period = assembly.sys_clk_period
-        print(f"sys_clk_period = {assembly.sys_clk_period}")
         
         self._logger = logging.getLogger(f"ftdeez_glasgow.GlasgowD2xxChannel.{id(self)}")
         self.flush_queued = False
@@ -474,6 +473,10 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
 
 async def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument('--manufacturer', action='store', default="Emarhavil Heavy Industries", help="manufacturer ID string")
+    parser.add_argument('--product', action='store', default="ftdeez", help="product ID string")
+    parser.add_argument('--serial', action='store', default="ftdeez", help="serial number string")
+    
     parser.add_argument('--channel', action='append', default=[], required=True, help="add a channel to ftdeez, with pins in a comma-delimited list.  can be specified multiple times to have a ftdeez with multiple channels")
     parser.add_argument('--voltage-a', action='store', type=float, default=3.3)
     parser.add_argument('--voltage-b', action='store', type=float, default=3.3)
@@ -522,7 +525,13 @@ async def main():
         
         channels.append(GlasgowD2xxChannel(assembly, out_pins))
 
-    dev = ftdeez.Ft2232Device(channels=channels)
+    dev = ftdeez.Ft2232Device(
+        channels=channels,
+        iManufacturer=args.manufacturer,
+        iProduct=args.product,
+        iSerialNumber=args.serial,
+    )
+
     usbctx = fakeusb1.FakeUSBContext(devices=[dev])
     
     async with assembly:
