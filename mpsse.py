@@ -405,7 +405,6 @@ import unittest
 from glasgow.gateware import simulation_test
 from amaranth.sim import Tick, Simulator
 
-# XXX: this has not been updated, obviously
 class MPSSETestbench(Elaboratable):
     def __init__(self):
         self.dut = MPSSE()

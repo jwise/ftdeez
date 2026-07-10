@@ -68,6 +68,27 @@ used as a base for my port to Amaranth.
 Thanks to the Amaranth and Glasgow contributors for building an HDL that
 was, overall, relatively pleasant to work with!
 
+## Where is the code?
+
+* `pyusbip.py` is a version of pyusbip that has been modified to be able to
+  talk to a `libusb1` other than the system-native one, and to be called
+  from other loops.
+
+* `fakeusb1.py` is a fake `usb1` Python library, that exports a fake
+  `USBContext`, and provides a wrapper for a base emulated USB device.
+
+* `ftdeez.py` implements a stub D2xx-like device on top of `fakeusb1` that
+   takes stub D2xx channels, and routes USB requests to the D2xx channels.
+
+* `ftdeez_glasgow.py` fills in the D2xx channel stub with a `GlasgowD2xxChannel`
+  implementation that wraps stream and register interfaces to Glasgow
+  gateware, which is implemented in `GlasgowD2xxComponent`.  It also
+  implements a `UartTx` and `UartRx` to abstract over those in Glasgow
+  itself, which are not meant to be embedded into other modules.
+
+* `mpsse.py` is an Amaranth implementation of the MPSSE state machine, and
+  some tests for it.  It is instantiated inside the `GlasgowD2xxComponent`.
+
 ## Contributing
 
 The code quality is pretty variable, because this was an extremely frumious
