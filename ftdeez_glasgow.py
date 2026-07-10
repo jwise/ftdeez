@@ -418,7 +418,14 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
             else:
                 buf = await self._pipe.recv(self._pipe.readable)
             await self.put_infifo(buf)
-            # handle latency timer flush character!
+            
+            # always flush latency buffer immediately.  there is a MPSSE
+            # control char for this, but the data is already here, may as
+            # well send it along -- we're not saving any CPU cycles at this
+            # point since Glasgow already sent it
+            await self.flag_inevent()
+
+            # XXX: UART: handle latency timer flush character!
         
         self.put_infifo(buf)
     
@@ -454,7 +461,7 @@ class GlasgowD2xxChannel(ftdeez.BaseD2xxChannel):
         await self._pipe.send(buf)
 
         async def do_flush():
-            await asyncio.sleep(0.01)
+            # do this after we handle all USB/IP URBs for the moment
             self.flush_queued = False
             await self._pipe.flush()
 
