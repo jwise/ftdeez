@@ -242,6 +242,9 @@ class MPSSE(wiring.Component):
                     m.d.sync += legacy_divisor_en.eq(0)
                 with m.Elif(curr_cmd == 0x8B):
                     m.d.sync += legacy_divisor_en.eq(1)
+                with m.Elif(curr_cmd == 0x8C):
+                    # enable 3-phase clocking -- we do not support it but sending the unexpected 0xFA back goes bad
+                    pass
                 with m.Elif(curr_cmd == 0x8D):
                     # disable 3-phase clocking -- we definitely support that
                     pass
