@@ -49,7 +49,7 @@ test/pyftdi-i2c.py`.
 
 ## Acknowledgements
 
-I built `ftdeez` on top of a previous extremely frumious hack of mine,
+I built `ftdeez` on top of a previous hack of mine,
 [pyusbip](https://github.com/jwise/pyusbip).
 
 @wanda-phi wrote the excellent
