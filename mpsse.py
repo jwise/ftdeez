@@ -309,6 +309,10 @@ class MPSSE(wiring.Component):
             with m.State("SHIFT-SETUP"), _resettable():
                 m.d.comb += clkgen.clken.eq(1)
                 m.d.comb += clkgen.tcken.eq(clkgen.clkneg)
+                with m.If(input_setup):
+                    m.d.sync += bits_out.eq(bits_out << 1),
+                    with m.If(shift_cmd.tdo):
+                        m.d.sync += bits_out[0].eq(pad_i_tdo)
                 with m.If(clkgen.clkneg):
                     m.next = "SHIFT-CLOCK"
 
@@ -498,7 +502,8 @@ class MPSSETestbench(Elaboratable):
                     raise Exception("DUT clocked out bit {} as {} (expected {})"
                                     .format(n // 2, badbit, 1 if in_bit else 0))
             if out_pos == tcknew:
-                out_bit = out_bits & (1 << (nbits - n // 2) - 1)
+                out_bit = 1 if (out_bits & (1 << (nbits - n // 2) - 1)) else 0
+                print(f"tdo -> {out_bit}")
                 ctx.set(self.tdo, out_bit)
 
         for _ in range(16 * self.clkdiv):
@@ -642,10 +647,58 @@ class MPSSETestCase(unittest.TestCase):
 
     @simulation_test_v2
     async def test_bits_read(self, ctx, tb):
+        ctx.set(tb.dut.pads_i[2], 1)
         await tb.write(ctx, 0x22)
         await tb.write(ctx, 5)
         self.assertEqual(ctx.get(tb.dut.position.bit), 5)
-        self.assertEqual(await tb.read(ctx), 0x00)
+        self.assertEqual(await tb.read(ctx), 0x3f) # should read SIX bits!
+
+    @simulation_test_v2
+    async def test_bytes_read(self, ctx, tb):
+        ctx.set(tb.dut.pads_i[2], 1)
+        await tb.write(ctx, 0x80)
+        await tb.write(ctx, 0x1)
+        await tb.write(ctx, 0x1)
+
+        await tb.write(ctx, 0x20)
+        await tb.write(ctx, 2)
+        await tb.write(ctx, 0)
+        self.assertEqual(ctx.get(tb.dut.position.lobyte), 2)
+        self.assertEqual(ctx.get(tb.dut.position.hibyte), 0)
+        self.assertEqual(ctx.get(tb.dut.position.bit), 7)
+
+        await tb.out_xfer(ctx, 8, 0xAA, False)
+        self.assertEqual(await tb.read(ctx), 0xAA)
+        await tb.out_xfer(ctx, 8, 0x55, False)
+        self.assertEqual(await tb.read(ctx), 0x55)
+        await tb.out_xfer(ctx, 8, 0x40, False)
+        self.assertEqual(await tb.read(ctx), 0x40)
+
+    @simulation_test_v2
+    async def test_i2c_seq(self, ctx, tb):
+        await tb.write(ctx, 0x80)
+        await tb.write(ctx, 0x02)
+        await tb.write(ctx, 0x03)
+        await ctx.tick().repeat(4)
+        self.assertEqual(ctx.get(tb.dut.pads_oe[1]), 1)
+        
+        await tb.write(ctx, 0x11)
+        await tb.write(ctx, 0x00)
+        await tb.write(ctx, 0x00)
+        await tb.write(ctx, 0x61)
+        
+        await tb.write(ctx, 0x80)
+        await tb.write(ctx, 0x00)
+        await tb.write(ctx, 0x01)
+        await ctx.tick().repeat(4)
+        self.assertEqual(ctx.get(tb.dut.pads_oe[1]), 0)
+        self.assertEqual(ctx.get(tb.dut.pads_oe[2]), 0)
+
+        ctx.set(tb.dut.pads_i[2], 1)
+        await tb.write(ctx, 0x22)
+        await tb.write(ctx, 0x00)
+        
+        self.assertEqual(await tb.read(ctx), 0x01)
 
     @simulation_test_v2
     async def test_legacy_divisor(self, ctx, tb):
