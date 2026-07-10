@@ -110,6 +110,10 @@ class MPSSE(wiring.Component):
     
     def elaborate(self, platform):
         m = Module()
+
+        # XXX: this should be programmed elsewhere rather than a fixed 48MHz sysclk
+        # delay on this opcode should be 5us, as per https://github.com/eblot/pyftdi/blob/25d77b02960dd42c018ac7c463b6a5500b95b5b6/pyftdi/ftdi.py#L1095
+        self.gpio_delay = gpio_delay = Signal(8, init=240)
         
         divisor = Signal(16, init=0)
         legacy_divisor_en = Signal(init=1)
@@ -356,9 +360,7 @@ class MPSSE(wiring.Component):
                     m.d.sync += self.pads_oe[0:8].eq(self.in_stream.payload)
                 with m.Else():
                     m.d.sync += self.pads_oe[8:16].eq(self.in_stream.payload)
-                # XXX: this should be programmed elsewhere rather than a fixed 48MHz sysclk
-                # delay on this opcode should be 5us, as per https://github.com/eblot/pyftdi/blob/25d77b02960dd42c018ac7c463b6a5500b95b5b6/pyftdi/ftdi.py#L1095
-                m.d.sync += position.as_value().eq(240)
+                m.d.sync += position.as_value().eq(gpio_delay)
                 m.next = "GPIO-WRITE-DELAY"
             
             with m.State("GPIO-WRITE-DELAY"), _resettable():
@@ -542,6 +544,7 @@ class MPSSETestCase(unittest.TestCase):
     async def configure(self, ctx, tb):
         # speed up tests
         ctx.set(tb.dut.legacy_divisor_en, 0)
+        ctx.set(tb.dut.gpio_delay, 1)
 
     @simulation_test_v2
     async def test_error(self, ctx, tb):
@@ -572,6 +575,7 @@ class MPSSETestCase(unittest.TestCase):
         await tb.write(ctx, 0x81)
         self.assertEqual(ctx.get(tb.dut.pads_o),  0x7EA1)
         self.assertEqual(ctx.get(tb.dut.pads_oe), 0x8152)
+        await ctx.tick().repeat(5)
         self.assertEqual(await tb.dut_state(ctx), "IDLE")
 
     @simulation_test_v2
